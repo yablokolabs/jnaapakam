@@ -1,0 +1,9 @@
+*.db
+*.pyc
+__pycache__/
+.venv/
+.env
+inbox/
+*.egg-info/
+dist/
+build/
