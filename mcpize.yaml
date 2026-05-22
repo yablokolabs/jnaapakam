@@ -1,0 +1,27 @@
+# MCPize Configuration
+# Docs: https://mcpize.com/docs/mcpize-yaml
+
+version: 1
+
+name: "Jñāpakam"
+slug: "jnaapakam"
+
+runtime: python
+entry: "reference/server.py"
+
+build:
+  install: "pip install -r requirements.txt"
+
+start:
+  type: http
+  command: "python"
+  args:
+    - "reference/server.py"
+
+bridge:
+  mode: http
+
+credentials:
+  - name: "ANTHROPIC_API_KEY"
+  - name: "OPENAI_API_KEY"
+  - name: "LLM_API_KEY"
