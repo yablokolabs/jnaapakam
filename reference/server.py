@@ -43,6 +43,71 @@ DEFAULT_HTTP_PORT = int(os.getenv("PORT") or os.getenv("MEMORY_PORT") or "8080")
 
 TEXT_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".log", ".xml", ".yaml", ".yml"}
 HTTP_HOST = "0.0.0.0"
+MCP_PROTOCOL_VERSION = "2025-03-26"
+SUPPORTED_MCP_PROTOCOL_VERSIONS = [MCP_PROTOCOL_VERSION]
+MCP_SERVER_INFO = {"name": "jnaapakam", "version": "0.1.0"}
+MCP_TOOLS = [
+    {
+        "name": "ingest_memory",
+        "description": "Store text in persistent memory with an optional source label.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to store in memory."},
+                "source": {"type": "string", "description": "Optional source label for the memory."},
+            },
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "query_memory",
+        "description": "Answer a question using stored memories.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "Question to answer from memory."},
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_memories",
+        "description": "List recent stored memories.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of memories to return.",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_memory_status",
+        "description": "Return memory database counts and server version.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "consolidate_memories",
+        "description": "Consolidate unconsolidated memories into higher-level insights.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="[%H:%M]")
 log = logging.getLogger("jnaapakam")
@@ -323,6 +388,187 @@ async def query(question):
     return await chat(model=MODEL, system=QUERY_SYSTEM, message=f"{context}\n\n---\nQuestion: {question}")
 
 
+# ─── MCP Protocol ──────────────────────────────────────────────
+
+
+class MCPProtocolError(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def mcp_response(request_id, result):
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def mcp_error(request_id, code, message, data=None):
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": request_id, "error": error}
+
+
+def mcp_text_result(text, structured=None, is_error=False):
+    result = {"content": [{"type": "text", "text": text}], "isError": is_error}
+    if structured is not None:
+        result["structuredContent"] = structured
+    return result
+
+
+def mcp_json_result(data, is_error=False):
+    return mcp_text_result(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        structured=data,
+        is_error=is_error,
+    )
+
+
+def require_string_arg(arguments, name):
+    value = arguments.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise MCPProtocolError(-32602, f"Missing required string argument: {name}")
+    return value.strip()
+
+
+def optional_int_arg(arguments, name, default, minimum=None, maximum=None):
+    value = arguments.get(name, default)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        raise MCPProtocolError(-32602, f"Argument must be an integer: {name}")
+    if minimum is not None and value < minimum:
+        raise MCPProtocolError(-32602, f"Argument must be >= {minimum}: {name}")
+    if maximum is not None and value > maximum:
+        raise MCPProtocolError(-32602, f"Argument must be <= {maximum}: {name}")
+    return value
+
+
+async def call_mcp_tool(name, arguments):
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        raise MCPProtocolError(-32602, "Tool arguments must be an object")
+
+    if name == "ingest_memory":
+        text = require_string_arg(arguments, "text")
+        source = arguments.get("source") or "mcp"
+        if not isinstance(source, str):
+            raise MCPProtocolError(-32602, "Argument must be a string: source")
+        return mcp_json_result(await ingest_text(text, source=source))
+
+    if name == "query_memory":
+        question = require_string_arg(arguments, "question")
+        answer = await query(question)
+        return mcp_text_result(answer, structured={"question": question, "answer": answer})
+
+    if name == "list_memories":
+        limit = optional_int_arg(arguments, "limit", 50, minimum=1, maximum=100)
+        memories = read_all_memories(limit=limit)
+        return mcp_json_result({"memories": memories, "count": len(memories)})
+
+    if name == "get_memory_status":
+        return mcp_json_result(get_stats())
+
+    if name == "consolidate_memories":
+        return mcp_json_result(await consolidate())
+
+    raise MCPProtocolError(-32602, f"Unknown tool: {name}")
+
+
+async def handle_mcp_method(method, params):
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise MCPProtocolError(-32602, "Params must be an object")
+
+    if method == "initialize":
+        return {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": MCP_SERVER_INFO,
+            "instructions": "Use the exposed tools to store, query, list, and consolidate persistent memories.",
+        }
+
+    if method == "server/discover":
+        return {
+            "resultType": "complete",
+            "supportedVersions": SUPPORTED_MCP_PROTOCOL_VERSIONS,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": MCP_SERVER_INFO,
+            "instructions": "Use the exposed tools to store, query, list, and consolidate persistent memories.",
+        }
+
+    if method == "ping":
+        return {}
+
+    if method == "tools/list":
+        return {"tools": MCP_TOOLS}
+
+    if method == "tools/call":
+        name = params.get("name")
+        if not isinstance(name, str) or not name:
+            raise MCPProtocolError(-32602, "Missing required tool name")
+        return await call_mcp_tool(name, params.get("arguments", {}))
+
+    if method == "resources/list":
+        return {"resources": []}
+
+    if method == "resources/templates/list":
+        return {"resourceTemplates": []}
+
+    if method == "prompts/list":
+        return {"prompts": []}
+
+    raise MCPProtocolError(-32601, f"Method not found: {method}")
+
+
+async def handle_mcp_message(message):
+    if not isinstance(message, dict):
+        return mcp_error(None, -32600, "Invalid Request")
+
+    request_id = message.get("id")
+    method = message.get("method")
+    if message.get("jsonrpc") != "2.0" or not isinstance(method, str):
+        return mcp_error(request_id, -32600, "Invalid Request")
+
+    if "id" not in message:
+        return None
+
+    try:
+        result = await handle_mcp_method(method, message.get("params"))
+        return mcp_response(request_id, result)
+    except MCPProtocolError as e:
+        return mcp_error(request_id, e.code, e.message)
+    except Exception as e:
+        log.exception("MCP method failed: %s", method)
+        return mcp_error(request_id, -32603, str(e))
+
+
+async def handle_mcp(req):
+    try:
+        payload = await req.json()
+    except Exception:
+        return web.json_response(mcp_error(None, -32700, "Parse error"), status=400)
+
+    if isinstance(payload, list):
+        if not payload:
+            return web.json_response(mcp_error(None, -32600, "Invalid Request"), status=400)
+        responses = []
+        for item in payload:
+            response = await handle_mcp_message(item)
+            if response:
+                responses.append(response)
+        if not responses:
+            return web.Response(status=202)
+        return web.json_response(responses)
+
+    response = await handle_mcp_message(payload)
+    if response is None:
+        return web.Response(status=202)
+    return web.json_response(response)
+
+
 # ─── File Watcher ──────────────────────────────────────────────
 
 
@@ -378,6 +624,14 @@ async def consolidation_loop(interval_minutes=30):
 def build_http():
     app = web.Application()
 
+    async def handle_info(req):
+        return web.json_response({
+            "name": "Jñāpakam",
+            "transport": "streamable-http",
+            "mcp_endpoint": "/mcp",
+            "tools": [tool["name"] for tool in MCP_TOOLS],
+        })
+
     async def handle_query(req):
         q = req.query.get("q", "").strip()
         if not q:
@@ -429,6 +683,10 @@ def build_http():
             return web.json_response({"error": "invalid JSON"}, status=400)
         return web.json_response(import_all(data))
 
+    app.router.add_get("/", handle_info)
+    app.router.add_get("/mcp", handle_info)
+    app.router.add_post("/", handle_mcp)
+    app.router.add_post("/mcp", handle_mcp)
     app.router.add_get("/status", handle_status)
     app.router.add_get("/memories", handle_memories)
     app.router.add_get("/query", handle_query)
