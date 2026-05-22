@@ -5,7 +5,7 @@ Always-on memory persistence for AI agents.
 Uses any OpenAI-compatible or Anthropic API for LLM operations.
 
 Usage:
-    python server.py                         # defaults: port 8889, consolidate every 30m
+    python server.py                         # defaults: $PORT, $MEMORY_PORT, or 8080
     python server.py --port 9000 --consolidate-every 15
     python server.py --watch ./inbox         # auto-ingest files from a folder
 
@@ -16,6 +16,8 @@ Environment:
     LLM_API_KEY          — API key for custom provider
     MEMORY_MODEL         — Model alias: haiku, sonnet, gpt4mini, or full model name
     MEMORY_DB            — SQLite database path (default: ./memory.db)
+    PORT                 — HTTP server port (default: 8080)
+    MEMORY_PORT          — Legacy HTTP server port fallback
 """
 
 import argparse
@@ -37,8 +39,10 @@ from llm import chat
 
 MODEL = os.getenv("MEMORY_MODEL", "haiku")
 DB_PATH = os.getenv("MEMORY_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.db"))
+DEFAULT_HTTP_PORT = int(os.getenv("PORT") or os.getenv("MEMORY_PORT") or "8080")
 
 TEXT_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".log", ".xml", ".yaml", ".yml"}
+HTTP_HOST = "0.0.0.0"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="[%H:%M]")
 log = logging.getLogger("jnaapakam")
@@ -447,7 +451,7 @@ async def main_async(args):
     log.info(f"   Database: {DB_PATH}")
     log.info(f"   Watch: {args.watch}")
     log.info(f"   Consolidate: every {args.consolidate_every}m")
-    log.info(f"   API: http://localhost:{args.port}")
+    log.info(f"   API: http://{HTTP_HOST}:{args.port}")
 
     tasks = [
         asyncio.create_task(watch_folder(args.watch)),
@@ -457,9 +461,9 @@ async def main_async(args):
     app = build_http()
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", args.port)
+    site = web.TCPSite(runner, HTTP_HOST, args.port)
     await site.start()
-    log.info(f"✅ Ready — http://localhost:{args.port}")
+    log.info(f"✅ Ready — http://{HTTP_HOST}:{args.port}")
 
     try:
         await asyncio.gather(*tasks)
@@ -471,7 +475,7 @@ async def main_async(args):
 
 def main():
     parser = argparse.ArgumentParser(description="jñāpakaṁ — AI agent memory persistence")
-    parser.add_argument("--port", type=int, default=int(os.getenv("MEMORY_PORT", "8889")))
+    parser.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT)
     parser.add_argument("--watch", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "inbox"))
     parser.add_argument("--consolidate-every", type=int, default=int(os.getenv("CONSOLIDATE_INTERVAL", "30")))
     parser.add_argument("--db", default=None, help="SQLite database path")
