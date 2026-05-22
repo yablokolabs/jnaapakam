@@ -1,5 +1,7 @@
 # jñāpakaṁ
 
+[![MCPize](https://mcpize.com/badge/@yablokolabs/jnaapakam)](https://mcpize.com/mcp/jnaapakam)
+
 **An open protocol for AI agent memory persistence.**
 
 *Your AI has a soul now. Don't lose it.*
@@ -99,6 +101,16 @@ requests.post("http://localhost:8889/ingest", json={
     "source": "conversation:2026-03-08"
 })
 ```
+
+## Connect via MCPize
+
+Use this MCP server instantly with no local installation:
+
+```bash
+npx -y mcpize connect @yablokolabs/jnaapakam --client claude
+```
+
+Or connect at: **https://mcpize.com/mcp/jnaapakam**
 
 ## Architecture
 
