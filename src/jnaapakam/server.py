@@ -7,6 +7,7 @@ and every destructive endpoint sits behind the same auth middleware.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 
@@ -59,6 +60,10 @@ NAMESPACE_PARAM = {
 
 CONFIG_KEY: web.AppKey[Config] = web.AppKey("config", Config)
 STORE_KEY: web.AppKey[Store] = web.AppKey("store", Store)
+# Exposed so the CLI's background loops reuse the same LLM-backed operations the
+# HTTP handlers use, rather than reimplementing them.
+INGEST_KEY: web.AppKey = web.AppKey("ingest")
+CONSOLIDATE_KEY: web.AppKey = web.AppKey("consolidate")
 
 MCP_TOOLS = [
     {
@@ -175,8 +180,8 @@ async def _json_body(request: web.Request) -> dict:
 
 
 def build_app(config: Config, chat) -> web.Application:
-    app = web.Application()
-    store = Store(config.db_path).initialize()
+    app = web.Application(client_max_size=config.max_body_bytes)
+    store = Store(config.db_path, max_query_terms=config.max_query_terms).initialize()
     app[CONFIG_KEY] = config
     app[STORE_KEY] = store
 
@@ -255,8 +260,28 @@ def build_app(config: Config, chat) -> web.Application:
         if config.auth_required:
             header = request.headers.get("Authorization", "")
             token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-            if token != config.auth_token:
+            # compare_digest: a plain != leaks the shared prefix length through timing.
+            if not hmac.compare_digest(token, config.auth_token):
                 return web.json_response({"error": "unauthorized"}, status=401)
+        return await handler(request)
+
+    @web.middleware
+    async def origin_middleware(request: web.Request, handler):
+        """Reject cross-origin writes.
+
+        A page the user visits can POST to 127.0.0.1 with no preflight, so an
+        unauthenticated local server would otherwise expose /clear, /restore and the
+        whole MCP tool surface to any website. Non-browser clients send no Origin
+        header and are unaffected.
+        """
+        origin = request.headers.get("Origin")
+        if origin and request.method not in ("GET", "HEAD", "OPTIONS"):
+            allowed = {f"http://{request.host}", f"https://{request.host}"}
+            if origin not in allowed:
+                log.warning("Rejected cross-origin %s %s from %s", request.method, request.path, origin)
+                return web.json_response(
+                    {"error": "cross-origin request refused"}, status=403
+                )
         return await handler(request)
 
     @web.middleware
@@ -270,7 +295,7 @@ def build_app(config: Config, chat) -> web.Application:
         except (ExtractionError, ValueError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
 
-    app.middlewares.extend([error_middleware, auth_middleware])
+    app.middlewares.extend([error_middleware, origin_middleware, auth_middleware])
 
     # ---- handlers ------------------------------------------------------
 
@@ -307,7 +332,8 @@ def build_app(config: Config, chat) -> web.Application:
         include_superseded = request.query.get("include_superseded") == "true"
         include_archived = request.query.get("include_archived") == "true"
         memories = await in_thread(
-            store.search, query, limit, namespace, include_superseded, include_archived
+            store.search, query, limit, namespace, include_superseded, include_archived,
+            200, True, config.weights, config.recency_halflife_days,
         )
         return web.json_response(
             {"query": query, "namespace": namespace, "memories": memories, "count": len(memories)}
@@ -358,11 +384,15 @@ def build_app(config: Config, chat) -> web.Application:
     async def handle_reconcile(request):
         namespace = request.query.get("namespace") or ""
         limit = _positive_int(request.query.get("limit"), "limit", 50, maximum=200)
-        result = await Reconciler(store, config, chat=chat).run(namespace=namespace, limit=limit)
+        result = await Reconciler(store, config, chat=chat, in_thread=in_thread).run(
+            namespace=namespace, limit=limit
+        )
         status = 200 if result["status"] != "disabled" else 409
         return web.json_response(result, status=status)
 
     async def handle_prune(request):
+        if not request.query.get("keep"):
+            raise web.HTTPBadRequest(reason="missing 'keep' parameter")
         keep = _positive_int(request.query.get("keep"), "keep", 1000, maximum=1_000_000)
         namespace = request.query.get("namespace") or ""
         return web.json_response(await in_thread(store.prune, keep, namespace))
@@ -496,9 +526,15 @@ def build_app(config: Config, chat) -> web.Application:
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         except MCPProtocolError as exc:
             return {"jsonrpc": "2.0", "id": request_id, "error": {"code": exc.code, "message": exc.message}}
-        except Exception as exc:  # surface as a JSON-RPC error, not a dropped connection
+        except Exception:  # surface as a JSON-RPC error, not a dropped connection
+            # The detail goes to the operator's log, not over the wire: provider errors
+            # routinely quote API keys and filesystem paths back at us.
             log.exception("MCP method failed: %s", method)
-            return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": str(exc)}}
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32603, "message": "internal error"},
+            }
 
     async def handle_mcp(request):
         try:
@@ -518,6 +554,9 @@ def build_app(config: Config, chat) -> web.Application:
             return web.json_response(responses) if responses else web.Response(status=202)
         response = await handle_message(payload)
         return web.json_response(response) if response is not None else web.Response(status=202)
+
+    app[INGEST_KEY] = ingest_text
+    app[CONSOLIDATE_KEY] = consolidate
 
     async def close_store(_app):
         await in_thread(store.close)

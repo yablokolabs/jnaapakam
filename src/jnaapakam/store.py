@@ -105,15 +105,44 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def build_match_query(text: str) -> str:
+MAX_QUERY_TERMS = 32
+
+
+def build_match_query(text: str, max_terms: int = MAX_QUERY_TERMS) -> str:
     """Turn arbitrary user text into a safe FTS5 MATCH expression.
 
     Every token is quoted, so FTS5 operators a user happens to type (``OR``,
     ``NEAR(``, ``*``, a stray quote) are searched for as text instead of being
     executed as query syntax or raising a parse error.
     """
-    tokens = re.findall(r"\w+", text or "", re.UNICODE)
-    return " OR ".join(f'"{token}"' for token in tokens)
+    seen: dict[str, None] = {}
+    for token in re.findall(r"\w+", text or "", re.UNICODE):
+        seen.setdefault(token, None)
+        if len(seen) >= max_terms:
+            # Cost grows roughly quadratically in matching terms, and search holds a
+            # process-wide lock, so an uncapped query stalls every other request.
+            break
+    return " OR ".join(f'"{token}"' for token in seen)
+
+
+def _statements(script: str) -> list[str]:
+    """Split a DDL script into statements.
+
+    `executescript` cannot be used inside an explicit transaction — it issues an
+    implicit COMMIT first — so the migration executes statements one at a time.
+    `sqlite3.complete_statement` is what keeps CREATE TRIGGER ... BEGIN ... END
+    intact, since a naive split on ';' would cut it apart.
+    """
+    statements, buffer = [], ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            if buffer.strip():
+                statements.append(buffer.strip())
+            buffer = ""
+    if buffer.strip():
+        statements.append(buffer.strip())
+    return statements
 
 
 def _synchronized(method):
@@ -128,8 +157,9 @@ def _synchronized(method):
 
 
 class Store:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, max_query_terms: int = MAX_QUERY_TERMS):
         self.db_path = db_path
+        self.max_query_terms = max_query_terms
         self._db: sqlite3.Connection | None = None
         # The server runs store calls on a thread-pool worker, so the connection is
         # shared across threads and every statement is serialised by this lock.
@@ -140,24 +170,49 @@ class Store:
     @property
     def db(self) -> sqlite3.Connection:
         if self._db is None:
-            self._db = sqlite3.connect(self.db_path, check_same_thread=False)
-            self._db.row_factory = sqlite3.Row
-            self._db.execute("PRAGMA journal_mode=WAL")
-            self._db.execute("PRAGMA busy_timeout=5000")
-            self._db.execute("PRAGMA foreign_keys=ON")
+            # Configure a local first and publish it only once every PRAGMA has
+            # succeeded. Assigning before configuring meant a transient "database is
+            # locked" on journal_mode=WAL left a permanently cached connection in
+            # rollback-journal mode with foreign keys off, silently and forever.
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            try:
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+            except BaseException:
+                conn.close()
+                raise
+            self._db = conn
         return self._db
 
     def initialize(self) -> Store:
+        """Create or upgrade the schema.
+
+        The whole migration runs under BEGIN IMMEDIATE: the lock only serialises
+        threads in this process, so without an exclusive transaction two processes
+        opening the same file both read the pre-migration column set and the losers
+        die on `duplicate column name`.
+        """
         with self._lock:
-            version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            self.db.executescript(BASE_SCHEMA)
-            self._add_missing_columns()
-            self.db.executescript(INDEXES)
-            self.db.executescript(FTS_SCHEMA)
-            if version < SCHEMA_VERSION:
-                self._backfill_full_text_index()
-                self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            self.db.commit()
+            self.db.isolation_level = None  # explicit transaction control
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                version = self.db.execute("PRAGMA user_version").fetchone()[0]
+                for statement in _statements(BASE_SCHEMA):
+                    self.db.execute(statement)
+                self._add_missing_columns()
+                for statement in _statements(INDEXES) + _statements(FTS_SCHEMA):
+                    self.db.execute(statement)
+                if version < SCHEMA_VERSION:
+                    self._backfill_full_text_index()
+                    self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            finally:
+                self.db.isolation_level = ""
         return self
 
     def _add_missing_columns(self) -> None:
@@ -233,6 +288,11 @@ class Store:
         Corrections invalidate rather than destroy: the superseded memory keeps its
         content and gains an end to its validity interval, so history survives and
         `include_superseded` can still reach it.
+
+        Refused when the result would be incoherent — an already-corrected memory
+        (which would silently overwrite a deliberate correction), a dead replacement,
+        a cycle (which would leave the namespace with no live head at all), or an
+        inverted validity interval.
         """
         if old_id == new_id:
             return False
@@ -247,15 +307,66 @@ class Store:
                 old_id, old["namespace"], new_id, new["namespace"],
             )
             return False
+        if old["superseded_by"] is not None:
+            log.warning(
+                "Refusing to supersede #%s: already superseded by #%s", old_id, old["superseded_by"]
+            )
+            return False
+        if new["superseded_by"] is not None or new["archived"]:
+            log.warning("Refusing to point #%s at #%s: the replacement is not live", old_id, new_id)
+            return False
+
+        # Walk forward from the replacement; if the chain reaches `old`, this closes a
+        # cycle and every memory in it would drop out of retrieval.
+        seen, cursor = {new_id}, new["superseded_by"]
+        while cursor is not None:
+            if cursor == old_id or cursor in seen:
+                log.warning("Refusing to supersede #%s with #%s: would close a cycle", old_id, new_id)
+                return False
+            seen.add(cursor)
+            row = self.db.execute(
+                "SELECT superseded_by FROM memories WHERE id = ?", (cursor,)
+            ).fetchone()
+            cursor = row["superseded_by"] if row else None
+
+        boundary = new["valid_from"] or new["created_at"]
+        start = old["valid_from"] or old["created_at"]
+        end_at, start_at = retrieval._parse_time(boundary), retrieval._parse_time(start)
+        if end_at and start_at and end_at < start_at:
+            # The caller has the direction backwards: closing before opening would
+            # make every point-in-time query over this memory return nothing.
+            log.warning(
+                "Refusing to supersede #%s with #%s: would invert its validity interval",
+                old_id, new_id,
+            )
+            return False
+
         self.db.execute(
             "UPDATE memories SET superseded_by = ?, valid_to = ? WHERE id = ?",
-            (new_id, new["valid_from"] or new["created_at"], old_id),
+            (new_id, boundary, old_id),
         )
         self.db.commit()
         return True
 
     @_synchronized
     def delete_memory(self, memory_id: int) -> bool:
+        """Erase a memory, repairing any correction chain that ran through it.
+
+        Without the repair, deleting a replacement strands the memory it replaced:
+        that predecessor keeps `superseded_by` pointing at a row that no longer
+        exists, and every default read path filters it out forever.
+        """
+        row = self.db.execute(
+            "SELECT superseded_by FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        successor = row["superseded_by"]
+        self.db.execute(
+            "UPDATE memories SET superseded_by = ?, valid_to = CASE WHEN ? IS NULL THEN NULL "
+            "ELSE valid_to END WHERE superseded_by = ?",
+            (successor, successor, memory_id),
+        )
         cursor = self.db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         self.db.commit()
         return cursor.rowcount > 0
@@ -265,9 +376,8 @@ class Store:
         """Delete memories. Scoped to one namespace when given, otherwise everything."""
         if namespace is None:
             count = self.db.execute("SELECT COUNT(*) AS c FROM memories").fetchone()["c"]
-            self.db.executescript(
-                "DELETE FROM memories; DELETE FROM consolidations; DELETE FROM processed_files;"
-            )
+            for table in ("memories", "consolidations", "processed_files"):
+                self.db.execute(f"DELETE FROM {table}")
         else:
             count = self.db.execute(
                 "SELECT COUNT(*) AS c FROM memories WHERE namespace = ?", (namespace,)
@@ -329,13 +439,15 @@ class Store:
         include_archived: bool = False,
         candidate_pool: int = 200,
         record_access: bool = True,
+        weights: dict | None = None,
+        halflife_days: float | None = None,
     ) -> list[dict]:
         """Rank memories by content relevance, then recency and importance.
 
         Replaces v0.1's `ORDER BY created_at DESC LIMIT 50`, under which anything
         older than the 50 most recent rows was unreachable regardless of content.
         """
-        match = build_match_query(query)
+        match = build_match_query(query, self.max_query_terms)
         if not match:
             return []
 
@@ -370,9 +482,20 @@ class Store:
             memory["lexical"] = max(0.0, relevance / best)
             candidates.append(memory)
 
-        ranked = retrieval.rank(candidates, now=_now(), limit=limit)
+        ranked = retrieval.rank(
+            candidates,
+            now=_now(),
+            weights=weights,
+            halflife_days=halflife_days or retrieval.DEFAULT_HALFLIFE_DAYS,
+            limit=limit,
+        )
         if record_access:
-            self._record_access([m["id"] for m in ranked])
+            try:
+                self._record_access([m["id"] for m in ranked])
+            except sqlite3.Error as exc:
+                # A counter is not worth failing a read for: a read-only database or a
+                # write lock held by another process must still return results.
+                log.warning("Could not record access counts: %s", exc)
         return ranked
 
     @_synchronized
@@ -495,6 +618,21 @@ class Store:
         return [self._row_to_memory(r) for r in rows]
 
     @_synchronized
+    def was_processed(self, path: str) -> bool:
+        return (
+            self.db.execute("SELECT 1 FROM processed_files WHERE path = ?", (path,)).fetchone()
+            is not None
+        )
+
+    @_synchronized
+    def mark_processed(self, path: str) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO processed_files (path, processed_at) VALUES (?, ?)",
+            (path, _now()),
+        )
+        self.db.commit()
+
+    @_synchronized
     def archive(self, memory_id: int) -> bool:
         """Remove a memory from retrieval without destroying it."""
         cursor = self.db.execute(
@@ -555,7 +693,21 @@ class Store:
 
     @_synchronized
     def import_all(self, data: dict) -> dict:
-        """Restore a backup, rejecting malformed input before writing anything."""
+        """Restore a backup atomically, preserving identity and repairing references.
+
+        Three properties the first implementation lacked:
+
+        * **Atomic.** Everything runs in one transaction. Previously a row that failed
+          coercion left earlier rows uncommitted but visible on the shared connection,
+          and the next `commit()` from any read made the rejected data permanent.
+        * **Identity-preserving.** Rows keep their original ids where those ids are
+          free, so `superseded_by`, `connections[].linked_to`, and
+          `consolidations.source_ids` still refer to the memories they were written
+          about. Reassigning ids silently repointed every correction chain.
+        * **Reference-repairing.** Where an id must change (a merge into a populated
+          store), references are remapped through the same mapping, and references
+          that resolve to nothing are dropped rather than left dangling.
+        """
         if not isinstance(data, dict):
             raise ValueError("backup must be a JSON object")
         memories = data.get("memories", [])
@@ -563,65 +715,153 @@ class Store:
         if not isinstance(memories, list) or not isinstance(consolidations, list):
             raise ValueError("'memories' and 'consolidations' must be arrays")
 
+        def as_json_text(value, default, field, index):
+            """Normalise a JSON column, rejecting anything unparseable."""
+            if value is None:
+                return default
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"memories[{index}].{field} is not valid JSON") from None
+            else:
+                parsed = value
+            if not isinstance(parsed, list):
+                raise ValueError(f"memories[{index}].{field} must be a JSON array")
+            return json.dumps(parsed)
+
+        # ---- validate everything before writing anything ----
+        prepared = []
         for index, memory in enumerate(memories):
             if not isinstance(memory, dict):
                 raise ValueError(f"memories[{index}] must be an object")
             for required in ("raw_text", "summary", "created_at"):
                 if not memory.get(required):
                     raise ValueError(f"memories[{index}] is missing '{required}'")
+            try:
+                importance = float(memory.get("importance", 0.5))
+                consolidated = int(memory.get("consolidated", 0))
+                archived = int(memory.get("archived", 0))
+                access_count = int(memory.get("access_count", 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"memories[{index}] has a non-numeric field: {exc}") from None
+            prepared.append(
+                {
+                    "old_id": memory.get("id"),
+                    "row": memory,
+                    "entities": as_json_text(memory.get("entities"), "[]", "entities", index),
+                    "topics": as_json_text(memory.get("topics"), "[]", "topics", index),
+                    "connections": as_json_text(memory.get("connections"), "[]", "connections", index),
+                    "importance": importance,
+                    "consolidated": consolidated,
+                    "archived": archived,
+                    "access_count": access_count,
+                }
+            )
 
+        prepared_consolidations = []
         for index, consolidation in enumerate(consolidations):
             if not isinstance(consolidation, dict):
                 raise ValueError(f"consolidations[{index}] must be an object")
             for required in ("source_ids", "summary", "insight", "created_at"):
                 if consolidation.get(required) is None:
                     raise ValueError(f"consolidations[{index}] is missing '{required}'")
+            raw_ids = consolidation["source_ids"]
+            if isinstance(raw_ids, str):
+                try:
+                    raw_ids = json.loads(raw_ids)
+                except (TypeError, ValueError):
+                    raise ValueError(f"consolidations[{index}].source_ids is not valid JSON") from None
+            if not isinstance(raw_ids, list):
+                raise ValueError(f"consolidations[{index}].source_ids must be a JSON array")
+            prepared_consolidations.append({"row": consolidation, "source_ids": raw_ids})
 
-        def as_json_text(value, default):
-            if value is None:
-                return default
-            return value if isinstance(value, str) else json.dumps(value)
+        # ---- write, atomically ----
+        taken = {r["id"] for r in self.db.execute("SELECT id FROM memories")}
+        id_map: dict[int, int] = {}
+        try:
+            for item in prepared:
+                memory = item["row"]
+                old_id = item["old_id"]
+                keep_id = (
+                    isinstance(old_id, int) and old_id > 0 and old_id not in taken
+                )
+                cursor = self.db.execute(
+                    "INSERT INTO memories (id, source, raw_text, summary, entities, topics, "
+                    "connections, importance, created_at, consolidated, namespace, kind, "
+                    "event_time, valid_from, valid_to, superseded_by, access_count, "
+                    "last_accessed, archived) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        old_id if keep_id else None,
+                        memory.get("source", ""),
+                        memory["raw_text"],
+                        memory["summary"],
+                        item["entities"],
+                        item["topics"],
+                        item["connections"],
+                        item["importance"],
+                        memory["created_at"],
+                        item["consolidated"],
+                        memory.get("namespace") or "",
+                        memory.get("kind") or "factual",
+                        memory.get("event_time"),
+                        memory.get("valid_from") or memory["created_at"],
+                        memory.get("valid_to"),
+                        memory.get("superseded_by"),
+                        item["access_count"],
+                        memory.get("last_accessed"),
+                        item["archived"],
+                    ),
+                )
+                new_id = cursor.lastrowid
+                taken.add(new_id)
+                if isinstance(old_id, int):
+                    id_map[old_id] = new_id
 
-        for memory in memories:
-            self.db.execute(
-                "INSERT INTO memories (source, raw_text, summary, entities, topics, connections, "
-                "importance, created_at, consolidated, namespace, kind, event_time, valid_from, "
-                "valid_to, superseded_by, access_count, last_accessed, archived) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    memory.get("source", ""),
-                    memory["raw_text"],
-                    memory["summary"],
-                    as_json_text(memory.get("entities"), "[]"),
-                    as_json_text(memory.get("topics"), "[]"),
-                    as_json_text(memory.get("connections"), "[]"),
-                    float(memory.get("importance", 0.5)),
-                    memory["created_at"],
-                    int(memory.get("consolidated", 0)),
-                    memory.get("namespace") or "",
-                    memory.get("kind") or "factual",
-                    memory.get("event_time"),
-                    memory.get("valid_from") or memory["created_at"],
-                    memory.get("valid_to"),
-                    memory.get("superseded_by"),
-                    int(memory.get("access_count", 0)),
-                    memory.get("last_accessed"),
-                    int(memory.get("archived", 0)),
-                ),
-            )
-        for consolidation in consolidations:
-            self.db.execute(
-                "INSERT INTO consolidations (source_ids, summary, insight, created_at) VALUES (?, ?, ?, ?)",
-                (
-                    as_json_text(consolidation["source_ids"], "[]"),
-                    consolidation["summary"],
-                    consolidation["insight"],
-                    consolidation["created_at"],
-                ),
-            )
-        self.db.commit()
+            def remap(reference):
+                """Translate a backup id, or None if it no longer resolves."""
+                if not isinstance(reference, int):
+                    return None
+                return id_map.get(reference)
+
+            # Second pass: rewrite every id reference through the mapping.
+            for new_id in id_map.values():
+                row = self.db.execute(
+                    "SELECT superseded_by, connections FROM memories WHERE id = ?", (new_id,)
+                ).fetchone()
+                pointer = remap(row["superseded_by"])
+                links = [
+                    {**link, "linked_to": remap(link.get("linked_to"))}
+                    for link in json.loads(row["connections"])
+                    if remap(link.get("linked_to")) is not None
+                ]
+                self.db.execute(
+                    "UPDATE memories SET superseded_by = ?, connections = ?, "
+                    "valid_to = CASE WHEN ? IS NULL THEN NULL ELSE valid_to END WHERE id = ?",
+                    (pointer, json.dumps(links), pointer, new_id),
+                )
+
+            for item in prepared_consolidations:
+                consolidation = item["row"]
+                mapped = [remap(i) for i in item["source_ids"]]
+                self.db.execute(
+                    "INSERT INTO consolidations (source_ids, summary, insight, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        json.dumps([i for i in mapped if i is not None]),
+                        consolidation["summary"],
+                        consolidation["insight"],
+                        consolidation["created_at"],
+                    ),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
         return {
             "status": "restored",
-            "memories_imported": len(memories),
-            "consolidations_imported": len(consolidations),
+            "memories_imported": len(prepared),
+            "consolidations_imported": len(prepared_consolidations),
         }
