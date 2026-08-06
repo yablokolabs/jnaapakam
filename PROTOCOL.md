@@ -377,7 +377,16 @@ deliberately not part of the backup payload.
 Import from a backup. Same format as the `/backup` response.
 
 The payload MUST be validated before any row is written; a malformed backup MUST
-return `400` rather than partially importing.
+return `400` rather than partially importing. Restore MUST be atomic — a failure
+part-way through MUST leave the store exactly as it was, with no transaction left
+open for a later read to commit.
+
+Restore MUST preserve referential integrity. Memory ids are referenced by
+`superseded_by`, `connections[].linked_to`, and `consolidations.source_ids`; an
+implementation MUST either preserve ids or remap every reference through the same
+mapping, and MUST drop references that no longer resolve rather than leaving them
+dangling. Reassigning ids without remapping silently repoints every correction chain
+in the backup.
 
 ## 3. Memory Schema (SQLite)
 
@@ -524,6 +533,10 @@ When a memory is superseded:
 - An implementation MUST NOT delete a memory in order to correct it. `/delete` exists for genuine erasure, such as a privacy request.
 - A superseded memory MUST remain retrievable when the caller asks for history.
 - Supersession MUST be refused when the two memories are in different namespaces, or when they are the same memory.
+- Supersession MUST be refused when the older memory is already superseded (it would overwrite a deliberate correction), when the replacement is itself superseded or archived, or when the link would close a cycle — a cycle leaves the namespace with no live head at all.
+- Supersession MUST NOT produce an inverted validity interval (`valid_to` before `valid_from`).
+- Deleting a memory MUST repair any correction chain running through it, so its predecessor is not hidden forever by a pointer to a row that no longer exists.
+- Ordering memories by time MUST compare parsed instants, not ISO-8601 strings: text comparison only agrees with chronology when every value shares one UTC offset, and `/restore` accepts any conformant timestamp.
 - Chains are permitted: A superseded by B superseded by C leaves only C active.
 
 v0.2 specifies the mechanism and its read semantics. *Deciding* that two memories
@@ -548,6 +561,10 @@ knowledge which is seldom accessed but essential.
 - Implementations SHOULD support encryption at rest for the database
 - Implementations SHOULD bound request body size
 - Backup exports SHOULD be encrypted when stored externally
+- An empty bind address MUST NOT be treated as loopback; it means all interfaces
+- Token comparison SHOULD be constant-time
+- An implementation SHOULD reject cross-origin writes: a loopback bind is not an authentication boundary against a browser
+- Error responses MUST NOT return internal exception text to the caller; upstream provider errors routinely quote credentials and filesystem paths
 - Ingested content is untrusted input that later reaches an LLM prompt; implementations SHOULD treat retrieved memories as data rather than instructions
 
 ## Version History

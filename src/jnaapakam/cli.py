@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import signal
@@ -14,7 +15,7 @@ from aiohttp import web
 
 from .config import Config, ConfigError
 from .llm import chat
-from .server import build_app
+from .server import CONSOLIDATE_KEY, INGEST_KEY, STORE_KEY, build_app
 from .store import Store
 
 log = logging.getLogger("jnaapakam")
@@ -82,12 +83,7 @@ async def _watch_folder(folder: str, store: Store, ingest, poll_interval: int = 
             for path in sorted(directory.iterdir()):
                 if path.name.startswith(".") or path.suffix.lower() not in TEXT_EXTENSIONS:
                     continue
-                seen = await asyncio.to_thread(
-                    lambda p=str(path): store.db.execute(
-                        "SELECT 1 FROM processed_files WHERE path = ?", (p,)
-                    ).fetchone()
-                )
-                if seen:
+                if await asyncio.to_thread(store.was_processed, str(path)):
                     continue
                 try:
                     text = path.read_text(encoding="utf-8", errors="replace")[:10000]
@@ -96,16 +92,7 @@ async def _watch_folder(folder: str, store: Store, ingest, poll_interval: int = 
                         await ingest(text, path.name)
                 except Exception as exc:
                     log.error("Failed to ingest %s: %s", path.name, exc)
-                await asyncio.to_thread(
-                    lambda p=str(path): (
-                        store.db.execute(
-                            "INSERT OR REPLACE INTO processed_files (path, processed_at) "
-                            "VALUES (?, datetime('now'))",
-                            (p,),
-                        ),
-                        store.db.commit(),
-                    )
-                )
+                await asyncio.to_thread(store.mark_processed, str(path))
         except Exception as exc:
             log.error("Watch error: %s", exc)
         await asyncio.sleep(poll_interval)
@@ -123,6 +110,7 @@ async def _consolidation_loop(interval_minutes: int, consolidate) -> None:
 
 async def _serve(config: Config) -> None:
     app = build_app(config, chat=chat)
+    store = app[STORE_KEY]
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, config.host, config.port)
@@ -134,6 +122,20 @@ async def _serve(config: Config) -> None:
     log.info("  database: %s", config.db_path)
     log.info("  auth:     %s", "required" if config.auth_required else "disabled (loopback only)")
 
+    # Previously neither loop was ever scheduled, so --watch and --consolidate-every
+    # were silently inert despite being documented and logged.
+    background = []
+    if config.watch_dir:
+        background.append(
+            asyncio.create_task(_watch_folder(config.watch_dir, store, app[INGEST_KEY]))
+        )
+    if config.consolidate_every_minutes > 0:
+        background.append(
+            asyncio.create_task(
+                _consolidation_loop(config.consolidate_every_minutes, app[CONSOLIDATE_KEY])
+            )
+        )
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -144,6 +146,11 @@ async def _serve(config: Config) -> None:
     try:
         await stop.wait()
     finally:
+        for task in background:
+            task.cancel()
+        for task in background:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await runner.cleanup()
         log.info("jnaapakam stopped.")
 

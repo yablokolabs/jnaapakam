@@ -141,6 +141,21 @@ curl -H "Authorization: Bearer $MEMORY_AUTH_TOKEN" http://your-host:8889/status
 
 Soul files and memories should never contain secrets or credentials.
 
+Two further protections on the default loopback deployment:
+
+- **Cross-origin writes are refused.** Loopback is not an authentication boundary
+  against a browser — any page you visit can POST to `127.0.0.1`. Requests carrying a
+  foreign `Origin` get a `403`. Non-browser clients send no `Origin` and are unaffected.
+- **An empty `MEMORY_HOST` falls back to `127.0.0.1`.** `MEMORY_HOST=` in a compose
+  file means "all interfaces" to the OS, so it is treated as a public bind and
+  requires a token.
+
+> [!WARNING]
+> Memory text reaches LLM prompts. Anything that can write a memory — `/ingest`, a
+> watched folder, `/restore` — can attempt prompt injection. The contradiction judge
+> fences memory text in per-call random delimiters and is told to treat it as data,
+> but treat ingestion from untrusted sources as a trust decision.
+
 ## Architecture
 
 ```
@@ -259,6 +274,7 @@ Three standard files that any agent framework can read.
 | `/reconcile` | POST | Detect and resolve contradictions (requires a judge model) |
 | `/prune` | POST | Archive all but the `?keep=N` highest-retention memories |
 | `/archive` | POST | Archive or restore one memory `{"memory_id": N, "restore": bool}` |
+| `/prune` requires `?keep=N` | | omitting it is a `400`, not a silent default |
 | `/namespaces` | GET | List namespaces with memory counts |
 | `/backup` | GET | Export memories and consolidations as JSON |
 | `/restore` | POST | Import from backup JSON |
