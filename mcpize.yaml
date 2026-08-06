@@ -10,7 +10,7 @@ runtime: python
 entry: "reference/server.py"
 
 build:
-  install: "pip install -r requirements.txt"
+  install: "pip install ."
 
 startCommand:
   type: http
@@ -22,6 +22,9 @@ bridge:
   mode: http
 
 credentials:
+  # Required since v0.2: the server refuses to bind a public interface without a
+  # token, because /clear and /restore are destructive and were previously open.
+  - name: "MEMORY_AUTH_TOKEN"
   - name: "ANTHROPIC_API_KEY"
   - name: "OPENAI_API_KEY"
   - name: "LLM_API_KEY"

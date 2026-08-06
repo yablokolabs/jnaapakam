@@ -11,7 +11,8 @@
 jñāpakaṁ (Sanskrit: *memory, reminder*) is an open standard for persisting AI agent identity, personality, and memory across sessions, restarts, and platforms. It provides:
 
 - 📋 **Soul Schema** — A standard format for defining who your agent *is*
-- 🧠 **Memory Protocol** — Ingest, consolidate, and query agent memories via a simple HTTP API
+- 🧠 **Memory Protocol** — Ingest, retrieve, consolidate, and query agent memories over HTTP or MCP
+- 🔍 **Real retrieval** — Full-text search with BM25 ranking, using nothing but stock SQLite
 - 🔄 **Backup & Restore** — Never lose your agent's accumulated knowledge
 - 🔌 **Framework Agnostic** — Works with any agent framework, any LLM provider
 
@@ -32,21 +33,23 @@ Some frameworks bolt on vector databases or conversation logs, but there's no st
 
 ### 1. Install
 
-```bash
-pip install jnaapakam
-```
-
-Or run from source:
+From source (works today):
 
 ```bash
 git clone https://github.com/yablokolabs/jnaapakam.git
 cd jnaapakam
-pip install -r requirements.txt
+pip install .
 ```
 
-### 2. Define Your Agent's Soul
+Once v0.2 is published to PyPI:
 
-Create the soul files in your agent's workspace:
+```bash
+pip install jnaapakam
+```
+
+The only runtime dependency is `aiohttp`. Full-text search uses SQLite's built-in FTS5, so there is no extension to compile, no daemon to run, and no network call on first start.
+
+### 2. Define Your Agent's Soul
 
 ```bash
 jnaapakam init
@@ -57,19 +60,20 @@ This creates:
 ```
 your-agent/
 ├── SOUL.md       # Personality, tone, boundaries
-├── IDENTITY.md   # Name, emoji, creature type
+├── IDENTITY.md   # Name, emoji, description
 └── MEMORY.md     # Long-term curated memory
 ```
 
-Edit them to match your agent's personality. See [schema/](schema/) for examples.
+Edit them to match your agent's personality. See [schema/](schema/) for the templates.
 
 ### 3. Start the Memory Server
 
 ```bash
-jnaapakam serve --port 8889
+export ANTHROPIC_API_KEY=sk-ant-...     # or OPENAI_API_KEY, or LLM_BASE_URL
+jnaapakam serve
 ```
 
-Your agent now has persistent memory via a simple HTTP API:
+Binds `127.0.0.1:8889` by default. Your agent now has persistent memory:
 
 ```bash
 # Store a memory
@@ -77,7 +81,10 @@ curl -X POST http://localhost:8889/ingest \
   -H 'Content-Type: application/json' \
   -d '{"text": "User prefers dark mode and vim keybindings", "source": "conversation"}'
 
-# Query memories
+# Search memories — returns ranked records with provenance
+curl "http://localhost:8889/search?q=editor+preferences"
+
+# Ask a question — returns a synthesized answer with citations
 curl "http://localhost:8889/query?q=what+are+the+user+preferences"
 
 # Check status
@@ -86,25 +93,25 @@ curl http://localhost:8889/status
 
 ### 4. Connect Your Agent
 
-Add to your agent's startup routine:
-
 ```python
 import requests
 
-# Retrieve context on startup
-resp = requests.get("http://localhost:8889/query", params={"q": "recent context and active tasks"})
-context = resp.json()["answer"]
+MEMORY = "http://localhost:8889"
 
-# Ingest important takeaways during conversation
-requests.post("http://localhost:8889/ingest", json={
+# Retrieve relevant context on startup
+hits = requests.get(f"{MEMORY}/search", params={"q": "recent context and active tasks"}).json()
+context = "\n".join(f"- {m['summary']}" for m in hits["memories"])
+
+# Ingest important takeaways during the conversation
+requests.post(f"{MEMORY}/ingest", json={
     "text": "User decided to switch from React to Svelte for the new project",
-    "source": "conversation:2026-03-08"
+    "source": "conversation:2026-03-08",
 })
 ```
 
 ## Connect via MCPize
 
-Use this MCP server instantly with no local installation:
+Use this MCP server with no local installation:
 
 ```bash
 npx -y mcpize connect @yablokolabs/jnaapakam --client claude
@@ -112,18 +119,40 @@ npx -y mcpize connect @yablokolabs/jnaapakam --client claude
 
 Or connect at: **https://mcpize.com/mcp/jnaapakam**
 
+## Security
+
+> [!IMPORTANT]
+> `/clear` and `/restore` are destructive. Since v0.2 the server **refuses to start** if it is told to bind a non-loopback address without an auth token.
+
+```bash
+# Local development — loopback, no token needed
+jnaapakam serve
+
+# Exposed deployment — a token is mandatory
+export MEMORY_AUTH_TOKEN=$(openssl rand -hex 32)
+jnaapakam serve --host 0.0.0.0
+```
+
+Authenticated requests send the token as a bearer credential:
+
+```bash
+curl -H "Authorization: Bearer $MEMORY_AUTH_TOKEN" http://your-host:8889/status
+```
+
+Soul files and memories should never contain secrets or credentials.
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   Your AI Agent                      │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │ SOUL.md  │  │IDENTITY.md│  │    MEMORY.md      │  │
-│  │personality│  │name, emoji│  │curated long-term  │  │
-│  └──────────┘  └──────────┘  └───────────────────┘  │
+│                   Your AI Agent                     │
+│  ┌──────────┐  ┌───────────┐  ┌───────────────────┐ │
+│  │ SOUL.md  │  │IDENTITY.md│  │    MEMORY.md      │ │
+│  │personality│ │name, emoji│  │curated long-term  │ │
+│  └──────────┘  └───────────┘  └───────────────────┘ │
 └──────────────────────┬──────────────────────────────┘
-                       │ HTTP API
-              ┌────────▼────────┐
+                       │ HTTP  /  MCP
+              ┌────────▼─────────┐
               │  jñāpakaṁ Server │
               │                  │
               │  ┌────────────┐  │
@@ -132,17 +161,17 @@ Or connect at: **https://mcpize.com/mcp/jnaapakam**
               │  └─────┬──────┘  │
               │        ▼         │
               │  ┌────────────┐  │
-              │  │  SQLite    │  │  ← Structured memory store
-              │  │  memory.db │  │
+              │  │  SQLite    │  │  ← Structured store
+              │  │  + FTS5    │  │  ← Full-text index, BM25 ranked
+              │  └─────┬──────┘  │
+              │        ▼         │
+              │  ┌────────────┐  │
+              │  │  Retrieve  │  │  ← relevance × recency × importance
+              │  │  (ranking) │  │  ← no LLM call, no network
               │  └─────┬──────┘  │
               │        ▼         │
               │  ┌────────────┐  │
               │  │Consolidate │  │  ← Periodic: find patterns, connections
-              │  │  (LLM)     │  │  ← Like sleep cycles for AI
-              │  └─────┬──────┘  │
-              │        ▼         │
-              │  ┌────────────┐  │
-              │  │   Query    │  │  ← Answer questions from memory
               │  │  (LLM)     │  │
               │  └────────────┘  │
               └──────────────────┘
@@ -150,23 +179,28 @@ Or connect at: **https://mcpize.com/mcp/jnaapakam**
 
 ### How It Works
 
-1. **Ingest** — Feed text to the server. An LLM extracts a summary, entities, topics, and importance score. Stored in SQLite.
+1. **Ingest** — Feed text to the server. An LLM extracts a summary, entities, topics, and an importance score. The original text is kept alongside the summary, and both are indexed.
 
-2. **Consolidate** — Every 30 minutes (configurable), the server reviews unconsolidated memories, finds cross-cutting patterns, and generates insights. Like how the human brain consolidates during sleep.
+2. **Retrieve** — Every query runs against the full-text index, not just the newest rows. Candidates are ranked by a weighted combination of lexical relevance (BM25), recency (exponential decay), and importance.
 
-3. **Query** — Ask any question. The server reads all memories and consolidation insights, then synthesizes an answer with source citations.
+3. **Consolidate** — Periodically the server reviews unconsolidated memories, finds cross-cutting patterns, and records insights and connections between them.
 
-### Why Not Vector Databases?
+4. **Query** — `/search` returns the ranked records themselves, with their sources and scores. `/query` additionally asks an LLM to synthesize an answer from them, with citations.
 
-Traditional RAG embeds once and retrieves later. No active processing. No consolidation. No cross-referencing.
+### On vector databases
 
-jñāpakaṁ uses an LLM to actively think about memories — finding connections, generating insights, compressing related information. The tradeoff: it uses more LLM calls, but produces richer, more connected memory.
+An earlier version of this README argued that active LLM consolidation was a *replacement* for retrieval. That was wrong, and the ordering it implied cost the project its most important feature: before v0.2, `/query` read the fifty most recent memories and ignored everything older, so a memory could become permanently unreachable purely by age.
 
-For most agent workloads (hundreds to low thousands of memories), this approach is simpler, cheaper, and more effective than maintaining a vector database pipeline.
+The current position is narrower and, we think, defensible:
+
+- **Retrieval is not optional.** A memory system that cannot find an old memory by its content is not a memory system.
+- **Consolidation is compression, not retrieval.** It earns its keep by summarizing and connecting memories, not by substituting for search.
+- **Lexical search goes further than expected.** FTS5 with BM25 ranking is built into stock SQLite. It needs no embeddings, no extension, and no network, and it covers the scale most agents actually operate at.
+- **Embeddings are a future increment, not a foundation.** When they land they will be a runtime-detected capability, so the zero-dependency path keeps working when they are unavailable.
 
 ## Soul Schema
 
-The soul schema defines three standard files that any agent framework can read:
+Three standard files that any agent framework can read.
 
 ### SOUL.md — Personality & Boundaries
 
@@ -190,7 +224,7 @@ The soul schema defines three standard files that any agent framework can read:
 
 - **Name:** Atlas
 - **Emoji:** 🗺️
-- **Personality:** Helpful navigator, slightly nerdy
+- **Description:** Helpful navigator, slightly nerdy
 - **Created:** 2026-03-01
 ```
 
@@ -214,14 +248,31 @@ The soul schema defines three standard files that any agent framework can read:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/status` | GET | Memory statistics (counts) |
-| `/memories` | GET | List stored memories (accepts `?limit=N`) |
+| `/search?q=...` | GET | **Ranked memory records** with sources and scores (`&limit=N&namespace=...`) |
+| `/query?q=...` | GET | LLM-synthesized answer with citations, plus the memories used |
+| `/memories` | GET | List recent memories (`?limit=N`) |
 | `/ingest` | POST | Ingest new text `{"text": "...", "source": "..."}` |
-| `/query?q=...` | GET | Query memory with natural language |
 | `/consolidate` | POST | Trigger manual consolidation |
 | `/delete` | POST | Delete a memory `{"memory_id": N}` |
-| `/clear` | POST | Delete all memories (full reset) |
-| `/backup` | GET | Export all data as JSON |
+| `/clear` | POST | Delete all memories (`?namespace=...` to scope the reset) |
+| `/supersede` | POST | Correct a memory `{"old_id": N, "new_id": M}` — invalidates, never deletes |
+| `/reconcile` | POST | Detect and resolve contradictions (requires a judge model) |
+| `/prune` | POST | Archive all but the `?keep=N` highest-retention memories |
+| `/archive` | POST | Archive or restore one memory `{"memory_id": N, "restore": bool}` |
+| `/namespaces` | GET | List namespaces with memory counts |
+| `/backup` | GET | Export memories and consolidations as JSON |
 | `/restore` | POST | Import from backup JSON |
+| `/mcp` | POST | MCP JSON-RPC endpoint (also served on `/`) |
+
+Prefer `/search` over `/query` when your agent should reason over the memories itself — it keeps provenance intact and skips an LLM call.
+
+### MCP tools
+
+`search_memory`, `ingest_memory`, `query_memory`, `list_memories`, `get_memory_status`, `consolidate_memories`.
+
+Every tool takes an optional `namespace` argument. The surface is deliberately
+small: tool definitions consume context on every request, so memory types arrive as
+parameters rather than as new tools.
 
 ## Configuration
 
@@ -229,26 +280,31 @@ The soul schema defines three standard files that any agent framework can read:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMORY_MODEL` | `default` | LLM model for memory operations |
-| `MEMORY_DB` | `./memory.db` | SQLite database path |
-| `MEMORY_PORT` | `8889` | HTTP server port |
+| `MEMORY_AUTH_TOKEN` | *(unset)* | Bearer token. **Required** to bind a non-loopback address |
+| `MEMORY_HOST` | `127.0.0.1` | Bind address |
+| `MEMORY_PORT` / `PORT` | `8889` | HTTP port |
+| `MEMORY_MODEL` | `default` | LLM model alias or full name |
+| `MEMORY_JUDGE_MODEL` | *(unset)* | Model for contradiction judging. Unset disables `/reconcile` |
+| `MEMORY_DB` | *(package dir)* `memory.db` | SQLite database path |
+| `MEMORY_WATCH` | *(unset)* | Folder to auto-ingest text files from |
 | `CONSOLIDATE_INTERVAL` | `30` | Minutes between consolidation cycles |
 
-### CLI Options
+### CLI
 
 ```bash
 jnaapakam serve [options]
 
-  --port PORT              HTTP API port (default: 8889)
-  --watch DIR              Folder to watch for file ingestion (default: ./inbox)
-  --consolidate-every MIN  Consolidation interval (default: 30)
-  --model MODEL            LLM model alias or full name
+  --host HOST              Bind address (default: 127.0.0.1)
+  --port PORT              HTTP port (default: 8889)
   --db PATH                SQLite database path
+  --model MODEL            LLM model alias or full name
+  --watch DIR              Folder to watch for file ingestion
+  --consolidate-every MIN  Consolidation interval (default: 30)
+
+jnaapakam init [directory]   Create SOUL.md / IDENTITY.md / MEMORY.md
 ```
 
 ## LLM Provider Support
-
-jñāpakaṁ is model-agnostic. Configure any provider:
 
 | Provider | Setup |
 |----------|-------|
@@ -257,77 +313,131 @@ jñāpakaṁ is model-agnostic. Configure any provider:
 | **Local (Ollama)** | `export LLM_BASE_URL=http://localhost:11434/v1` |
 | **Any OpenAI-compatible** | Set `LLM_BASE_URL` and `LLM_API_KEY` |
 
-The reference implementation uses Anthropic Haiku by default (fast and cheap for background memory work), with automatic fallback support.
+Model aliases: `haiku`, `sonnet`, `opus`, `gpt4mini`, `gpt4`. Any other value is passed through unchanged, so custom and locally-hosted model names work as-is.
+
+> [!NOTE]
+> Provider model IDs get retired on a schedule, and a retired ID returns a 404. v0.1 shipped a default that was withdrawn while still in the code, which — combined with an over-broad `except` — meant failed extractions were stored as degraded memories and reported as successes. Both are fixed, and a test now fails the build if any shipped alias points at a known-retired model.
 
 ## Framework Integration
-
-### OpenClaw
-
-Add to your agent's `AGENTS.md`:
-
-```markdown
-## Shared Memory
-
-Query memory on session start:
-\`\`\`bash
-curl -s "http://localhost:8889/query?q=recent+context"
-\`\`\`
-
-Ingest takeaways during conversations:
-\`\`\`bash
-curl -s -X POST http://localhost:8889/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"text": "...", "source": "conversation"}'
-\`\`\`
-```
 
 ### LangChain
 
 ```python
 from langchain.tools import Tool
+import requests
 
-memory_tool = Tool(
-    name="agent_memory",
-    description="Query the agent's persistent memory",
-    func=lambda q: requests.get(f"http://localhost:8889/query?q={q}").json()["answer"]
+MEMORY = "http://localhost:8889"
+
+recall = Tool(
+    name="search_memory",
+    description="Search the agent's persistent memory for relevant past context",
+    func=lambda q: requests.get(f"{MEMORY}/search", params={"q": q}).json()["memories"],
 )
 ```
 
 ### CrewAI
 
 ```python
-from crewai import Tool
+from crewai.tools import tool
+import requests
 
-@Tool
-def remember(query: str) -> str:
-    """Query persistent agent memory."""
-    return requests.get(f"http://localhost:8889/query?q={query}").json()["answer"]
+@tool("Search Memory")
+def search_memory(query: str) -> str:
+    """Search persistent agent memory for relevant past context."""
+    hits = requests.get("http://localhost:8889/search", params={"q": query}).json()
+    return "\n".join(f"[#{m['id']}] {m['summary']}" for m in hits["memories"])
 ```
 
-### Raw Python Agent
+See [examples/](examples/) for OpenClaw, LangChain, and CrewAI setups.
 
-```python
-class PersistentAgent:
-    def __init__(self, memory_url="http://localhost:8889"):
-        self.memory = memory_url
-        # Load context on startup
-        self.context = requests.get(f"{self.memory}/query?q=who+am+i").json()["answer"]
+## Namespaces & Multi-Agent Support
 
-    def on_conversation_end(self, summary: str):
-        requests.post(f"{self.memory}/ingest", json={"text": summary, "source": "conversation"})
+Every memory belongs to a **namespace** — a project, agent, or tenant. Omitting it
+uses the shared namespace `""`, so single-tenant setups need no changes.
+
+```bash
+curl -X POST http://localhost:8889/ingest \
+  -d '{"text": "the deploy target is staging", "namespace": "project-a"}'
+
+curl "http://localhost:8889/search?q=deploy+target&namespace=project-a"   # finds it
+curl "http://localhost:8889/search?q=deploy+target&namespace=project-b"   # finds nothing
+curl "http://localhost:8889/namespaces"
 ```
 
-## Multi-Agent Support
+Retrieval, listing, consolidation, and stats are all scoped. Omitting `namespace`
+means the shared namespace — **not** "every namespace".
 
-Multiple agents can share the same memory server, creating a collective knowledge base:
+### Why this is a correctness feature
 
+Namespaces are what make memory *correction* possible. "The preferred editor is
+vim" and "the preferred editor is VS Code" are a genuine contradiction within one
+project and two compatible facts across two. Without an enforceable boundary, any
+system that resolves contradictions will delete memories that were true.
+
+## Correcting a Memory
+
+Corrections invalidate; they never delete.
+
+```bash
+curl -X POST http://localhost:8889/supersede -d '{"old_id": 3, "new_id": 4}'
 ```
-Agent A (Coder) ──┐
-                  ├──► jñāpakaṁ Server ◄──► memory.db
-Agent B (Analyst)─┘
+
+The superseded memory keeps its content, gains an end to its validity interval, and
+drops out of normal retrieval — but stays reachable when you ask for history:
+
+```bash
+curl "http://localhost:8889/search?q=deadline&include_superseded=true"
 ```
 
-Each agent ingests from its own domain; all agents can query the shared pool.
+Supersession across namespaces is refused: retiring a fact in someone else's scope
+would delete something still true there. `/delete` remains for genuine erasure.
+
+### Detecting contradictions automatically
+
+`POST /reconcile` finds conflicting memories and supersedes the stale one. It is
+**off unless you name a judge model**, because contradiction judging degrades
+sharply on small models — and this is a feature that *deletes things* when it is
+wrong:
+
+```bash
+export MEMORY_JUDGE_MODEL=sonnet
+curl -X POST "http://localhost:8889/reconcile?namespace=project-a"
+```
+
+Without it you get a `409` explaining why rather than silent inaction.
+
+Four guardrails, each because the failure mode is real:
+
+| Guardrail | Why |
+|---|---|
+| **Off by default** | Small models collapse at this task; the default model is a small one |
+| **Deterministic prefilter** | Only same-namespace pairs with real word overlap cost an LLM call — bounds spend and removes obvious false positives |
+| **Reasoning before verdict** | A response whose verdict precedes its reasoning is rejected as unreasoned. Ordering the schema this way measurably rescues weaker models |
+| **Abstain when unsure** | Below the confidence threshold nothing happens. Keeping a stale memory beats destroying a true one |
+
+Reconciliation never runs on the ingest path, so a slow or failing judge cannot
+block a write. Tune with `reconcile_min_confidence`, `reconcile_min_overlap`, and
+`reconcile_max_comparisons`.
+
+## Forgetting
+
+Forgetting is soft. Memories are **archived, never deleted**:
+
+```bash
+curl -X POST "http://localhost:8889/prune?keep=500&namespace=project-a"
+curl "http://localhost:8889/search?q=...&include_archived=true"   # still reachable
+curl -X POST http://localhost:8889/archive -d '{"memory_id": 7, "restore": true}'
+```
+
+Retention combines importance, **how often the memory was actually recalled**, and
+temporal decay. The frequency term matters most: `importance` is assigned once by an
+LLM at ingest and never revised, so it cannot distinguish a memory that proved
+useful from one that merely sounded important. Superseded memories are evicted
+before live ones.
+
+> [!NOTE]
+> The literature publishes no agreed decay formula, so these weights are defaults to
+> tune, not findings. Nothing is ever destroyed automatically.
 
 ## Deployment
 
@@ -338,7 +448,9 @@ Each agent ingests from its own domain; all agents can query the shared pool.
 Description=jñāpakaṁ Memory Server
 
 [Service]
-ExecStart=/usr/bin/python3 /path/to/jnaapakam/server.py --port 8889
+Environment="MEMORY_AUTH_TOKEN=<your-token>"
+Environment="ANTHROPIC_API_KEY=<your-key>"
+ExecStart=/usr/bin/jnaapakam serve --host 0.0.0.0
 Restart=on-failure
 RestartSec=10
 
@@ -348,26 +460,34 @@ WantedBy=default.target
 
 ### Docker
 
-```bash
-docker run -d -p 8889:8889 -v ./data:/app/data yablokolabs/jnaapakam
-```
+No image is published yet. To build one:
 
-### macOS (launchd)
-
-```bash
-jnaapakam install-service  # Creates and loads a LaunchAgent
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY . .
+RUN pip install .
+ENV MEMORY_DB=/data/memory.db MEMORY_HOST=0.0.0.0
+VOLUME /data
+EXPOSE 8889
+CMD ["jnaapakam", "serve"]
 ```
 
 ## Roadmap
 
-- [ ] Backup/restore endpoints
+- [x] Backup/restore endpoints
+- [x] Real retrieval (FTS5 + BM25 ranking)
+- [x] Authentication and safe bind defaults
+- [x] Multi-agent namespacing and scoped retrieval
+- [x] Memory correction: supersede and invalidate rather than delete
+- [x] Validity intervals (`valid_from` / `valid_to`) and usage tracking
+- [x] Automatic contradiction detection driving supersession
+- [x] Soft forgetting: retention scoring, archive and prune
+- [ ] Optional embeddings as a runtime-detected capability
+- [ ] Pluggable storage backends (Postgres/pgvector, embedded graph)
 - [ ] Encryption at rest
-- [ ] Multi-agent namespacing
-- [ ] WebSocket streaming for real-time memory updates
 - [ ] Memory expiry and retention policies
 - [ ] Dashboard UI
-- [ ] Plugin system for custom memory processors
-- [ ] Cloud sync (jñāpakaṁ.ai)
 
 ## Philosophy
 
@@ -375,20 +495,20 @@ jnaapakam install-service  # Creates and loads a LaunchAgent
 
 jñāpakaṁ is designed to be:
 
-- **Simple** — SQLite + HTTP + LLM. No infrastructure sprawl.
+- **Simple** — SQLite + HTTP + LLM. One dependency. No infrastructure sprawl.
 - **Portable** — Standard files and APIs. Move between frameworks freely.
 - **Respectful** — Your agent's memories belong to you. Always local-first.
-- **Alive** — Active consolidation, not passive storage. Memories evolve.
+- **Honest** — If an extraction fails you get an error, not a quietly degraded memory.
 
 ## Contributing
 
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Areas we'd love help with:
+- Multi-agent namespacing design
 - Integration examples for more frameworks
-- Alternative LLM provider backends
 - Memory visualization tools
-- Performance benchmarks
+- Benchmarks at realistic memory scales
 
 ## License
 
