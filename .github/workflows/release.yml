@@ -1,0 +1,74 @@
+name: Publish to PyPI
+
+# Publishing is irreversible: a version number can never be reused on PyPI, even
+# after deletion. So this runs only on an explicit tag, and the release job is
+# gated behind a GitHub Environment you can require manual approval on.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the full test suite before building
+        run: |
+          pip install -e ".[dev]"
+          ruff check src tests
+          pytest -q
+
+      - name: Refuse to publish a version that is not release-ready
+        run: |
+          python - <<'PY'
+          import re, pathlib, sys
+          version = re.search(
+              r'^version = "([^"]+)"', pathlib.Path("pyproject.toml").read_text(), re.M
+          ).group(1)
+          print(f"pyproject version: {version}")
+          if any(marker in version for marker in ("dev", "a", "b", "rc")):
+              sys.exit(f"Refusing to publish pre-release version {version!r}. Set a final version first.")
+          PY
+
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          python -m build
+
+      - name: Verify the artifacts are well-formed
+        run: |
+          pip install twine
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Configure this environment in repo Settings → Environments and add a required
+    # reviewer if you want a human approval step before anything reaches PyPI.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/jnaapakam
+    permissions:
+      # Required for Trusted Publishing. No API token is stored anywhere.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1

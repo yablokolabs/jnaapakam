@@ -1,9 +1,11 @@
 *.db
-*.pyc
-__pycache__/
-.venv/
-.env
-inbox/
 *.egg-info/
-dist/
+*.pyc
+.env
+.venv/
+.worktrees/
+__pycache__/
 build/
+dist/
+inbox/
+uv.lock
