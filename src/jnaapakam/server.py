@@ -60,6 +60,17 @@ NAMESPACE_PARAM = {
 
 CONFIG_KEY: web.AppKey[Config] = web.AppKey("config", Config)
 STORE_KEY: web.AppKey[Store] = web.AppKey("store", Store)
+
+# Routes that probes, discovery clients, and the MCP bridge can hit without
+# credentials. They expose no destructive operations: / is server metadata,
+# /health is a liveness check, and the MCP JSON-RPC surface (POST / and POST
+# /mcp) carries only the MCP tools — search, ingest, query, list, status,
+# consolidate. The MCPize in-container HTTP bridge cannot attach a bearer token,
+# so that surface must stay reachable without one; every REST data endpoint
+# (including /clear, /restore, /delete, /backup) remains behind auth.
+AUTH_PUBLIC_ROUTES = frozenset(
+    {("GET", "/"), ("GET", "/health"), ("GET", "/mcp"), ("POST", "/"), ("POST", "/mcp")}
+)
 # Exposed so the CLI's background loops reuse the same LLM-backed operations the
 # HTTP handlers use, rather than reimplementing them.
 INGEST_KEY: web.AppKey = web.AppKey("ingest")
@@ -257,7 +268,7 @@ def build_app(config: Config, chat) -> web.Application:
 
     @web.middleware
     async def auth_middleware(request: web.Request, handler):
-        if config.auth_required:
+        if config.auth_required and (request.method, request.path) not in AUTH_PUBLIC_ROUTES:
             header = request.headers.get("Authorization", "")
             token = header[7:].strip() if header.lower().startswith("bearer ") else ""
             # compare_digest: a plain != leaks the shared prefix length through timing.
@@ -270,9 +281,8 @@ def build_app(config: Config, chat) -> web.Application:
         """Reject cross-origin writes.
 
         A page the user visits can POST to 127.0.0.1 with no preflight, so an
-        unauthenticated local server would otherwise expose /clear, /restore and the
-        whole MCP tool surface to any website. Non-browser clients send no Origin
-        header and are unaffected.
+        unauthenticated local server would otherwise expose /clear and /restore to
+        any website. Non-browser clients send no Origin header and are unaffected.
         """
         origin = request.headers.get("Origin")
         if origin and request.method not in ("GET", "HEAD", "OPTIONS"):
@@ -309,6 +319,10 @@ def build_app(config: Config, chat) -> web.Application:
                 "tools": [tool["name"] for tool in MCP_TOOLS],
             }
         )
+
+    async def handle_health(request):
+        """Liveness for platform startup probes: reachable without credentials."""
+        return web.json_response({"status": "ok", "name": "jnaapakam", "version": "0.2.0"})
 
     async def handle_status(request):
         namespace = request.query.get("namespace")
@@ -564,6 +578,7 @@ def build_app(config: Config, chat) -> web.Application:
     app.on_cleanup.append(close_store)
 
     app.router.add_get("/", handle_info)
+    app.router.add_get("/health", handle_health)
     app.router.add_get("/mcp", handle_info)
     app.router.add_post("/", handle_mcp)
     app.router.add_post("/mcp", handle_mcp)

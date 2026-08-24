@@ -21,10 +21,24 @@ startCommand:
 bridge:
   mode: http
 
-credentials:
-  # Required since v0.2: the server refuses to bind a public interface without a
-  # token, because /clear and /restore are destructive and were previously open.
+secrets:
+  # Publisher secret, provided at deploy time. Since v0.2 the server refuses to
+  # bind a public interface without this token (it guards /clear and /restore),
+  # so a deployment without it never comes up — the startup probe fails.
+  # Generate one with: openssl rand -hex 32
   - name: "MEMORY_AUTH_TOKEN"
+    required: true
+    description: "Bearer token protecting /clear and /restore"
+
+credentials:
+  # Subscriber BYOK keys, injected per user at connect time. The server starts
+  # without them; only LLM-backed operations (ingest/query/consolidate) need one.
   - name: "ANTHROPIC_API_KEY"
+    required: false
+    description: "Anthropic API key (used by the default model)"
   - name: "OPENAI_API_KEY"
+    required: false
+    description: "OpenAI API key"
   - name: "LLM_API_KEY"
+    required: false
+    description: "API key for a custom LLM_BASE_URL endpoint"

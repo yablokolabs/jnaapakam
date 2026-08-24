@@ -119,6 +119,11 @@ npx -y mcpize connect @yablokolabs/jnaapakam --client claude
 
 Or connect at: **https://mcpize.com/mcp/jnaapakam**
 
+Deploying this repo yourself? `mcpize deploy` requires the publisher secret
+`MEMORY_AUTH_TOKEN` (generate with `openssl rand -hex 32`) — the server refuses
+to bind a public interface without it. The server listens on `0.0.0.0:$PORT` and
+exposes a public `GET /health` for platform startup probes.
+
 ## Security
 
 > [!IMPORTANT]
@@ -138,6 +143,13 @@ Authenticated requests send the token as a bearer credential:
 ```bash
 curl -H "Authorization: Bearer $MEMORY_AUTH_TOKEN" http://your-host:8889/status
 ```
+
+The MCP JSON-RPC endpoints (`POST /mcp` and `POST /`) are exempt from the bearer
+check: the MCPize in-container bridge cannot attach credentials, and the MCP
+surface (search/ingest/query/list/status/consolidate) contains no destructive
+operations. Every REST endpoint — including `/clear`, `/restore`, `/delete`, and
+`/backup` — still requires the token. On MCPize, Cloud Run's ingress guard also
+blocks anonymous access to the container URL.
 
 Soul files and memories should never contain secrets or credentials.
 
