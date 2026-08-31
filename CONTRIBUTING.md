@@ -5,6 +5,7 @@ Thanks for your interest in contributing! Here's how to get started.
 ## Areas We Need Help With
 
 - 🏷️ **Multi-agent namespacing** — the largest open design question; see PROTOCOL.md §6
+- 🧬 **Signed continuity records** — v0.3 gives integrity, not authenticity; see PROTOCOL.md §10.6
 - 🔌 **Integration examples** — more framework integrations (AutoGen, Semantic Kernel, ADK, etc.)
 - 🤖 **LLM providers** — additional backend support (Groq, Together, Mistral, local models)
 - 📊 **Memory visualization** — dashboard or CLI tools to browse memories

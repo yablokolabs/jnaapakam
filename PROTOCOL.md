@@ -1,11 +1,32 @@
-# jñāpakaṁ Protocol Specification v0.2
+# jñāpakaṁ Protocol Specification v0.3
 
 ## Overview
 
-The jñāpakaṁ protocol defines a standard for AI agent memory persistence. It consists of two parts:
+The jñāpakaṁ protocol defines a standard for AI agent memory persistence. It consists of three parts:
 
 1. **Soul Schema** — Static identity files that define who an agent is
 2. **Memory API** — HTTP endpoints for dynamic memory operations
+3. **Continuity Record** — The agent's permanent identity, its generations, and the migrations between them (§10)
+
+### What changed in v0.3
+
+v0.2 made an agent's memory portable. v0.3 makes it portable *across generations of
+the agent itself* — a new model, runtime, host, or machine — without the accumulated
+identity and history starting from zero.
+
+| Change | Compatibility |
+|--------|---------------|
+| **Permanent `agent_id`** — a stable identifier independent of name, model, runtime, host and generation (§10.1) | Additive; minted automatically when an existing database is opened |
+| **Generations** — a portable record of the runtime an agent ran as, with a parent pointer (§10.2) | Additive |
+| **Migration records** — provenance for every transition, including its outcome (§10.4) | Additive |
+| **Continuity validation** — six named checks, each reporting its own result (§10.5) | Additive |
+| **Artifact integrity** — SHA-256 digests over soul files and the memory corpus (§10.6) | Additive |
+| `GET /agent`, `GET /generations`, `GET /generations/diff`, `GET /migrations` added | Additive |
+| `POST /generations`, `/generations/artifacts`, `/generations/validate`, `/generations/promote`, `/generations/reject`, `/generations/rollback` added | Additive |
+| MCP gains three **read-only** tools: `get_agent_identity`, `list_generations`, `diff_generations` | Additive |
+| `/backup` gains `agent_id`, `generations`, `migrations`, `artifacts`, `corpus_digest`; soul files still excluded | Additive; a v0.2 backup still restores |
+| `/restore` refuses a backup from a different agent when the store already has a lineage | New refusal on data v0.2 could not produce |
+| `version` reported by `/status` and `/backup` becomes `"0.3"` | **Breaking** only for a client asserting the exact string |
 
 ### What changed in v0.2
 
@@ -118,7 +139,7 @@ Periodic tasks the agent should check on.
 - **Content-Type:** `application/json`
 - **Default Port:** 8889
 - **Default Bind:** `127.0.0.1`
-- **Base Path:** `/` (no versioned prefix in v0.2)
+- **Base Path:** `/` (no versioned prefix in v0.3)
 
 ### Authentication
 
@@ -159,7 +180,7 @@ Returns memory statistics.
   "total_memories": 42,
   "unconsolidated": 5,
   "consolidations": 8,
-  "version": "0.2"
+  "version": "0.3"
 }
 ```
 
@@ -358,23 +379,33 @@ Delete all memories, consolidations, and processed file records. Destructive; MU
 
 #### GET /backup
 
-Export memories and consolidations as JSON.
+Export memories, consolidations, and the continuity record as JSON.
 
 ```json
 {
-  "version": "0.2",
+  "version": "0.3",
   "exported_at": "2026-03-08T12:00:00Z",
+  "agent_id": "urn:jnaapakam:agent:...",
+  "current_generation": 2,
+  "corpus_digest": "sha256 hex",
   "memories": [ ... ],
-  "consolidations": [ ... ]
+  "consolidations": [ ... ],
+  "generations": [ ... ],
+  "migrations": [ ... ],
+  "artifacts": [ ... ]
 }
 ```
 
 Soul files are plain files on disk and are versioned by the user; they are
-deliberately not part of the backup payload.
+deliberately not part of the backup payload. Only their *digests* travel, inside
+`artifacts`, so a restore can prove the soul that arrived is the soul that left
+without the backup becoming a place secrets could hide.
 
 #### POST /restore
 
 Import from a backup. Same format as the `/backup` response.
+
+A v0.2 payload carries none of the continuity keys and MUST still restore.
 
 The payload MUST be validated before any row is written; a malformed backup MUST
 return `400` rather than partially importing. Restore MUST be atomic — a failure
@@ -387,6 +418,67 @@ implementation MUST either preserve ids or remap every reference through the sam
 mapping, and MUST drop references that no longer resolve rather than leaving them
 dangling. Reassigning ids without remapping silently repoints every correction chain
 in the backup.
+
+Restore MUST apply the same rules to the continuity record: generation ids are
+referenced by `generations.parent_id`, `migrations.from_generation`,
+`migrations.to_generation`, and `artifacts.generation_id`. See §10.8 for the
+identity rules a restore MUST enforce before writing anything.
+
+### Continuity Endpoints
+
+All of these are ordinary REST endpoints and MUST sit behind the same
+authentication as the rest of the API. See §10 for their semantics.
+
+#### GET /agent
+
+```json
+{"agent_id": "urn:jnaapakam:agent:...", "created_at": "...",
+ "current_generation": 2, "generations": 3, "version": "0.3"}
+```
+
+#### GET /generations
+
+Lists every generation. With `?id=N`, returns that generation plus its `ancestry`
+and recorded `artifacts`. An unknown id MUST return `404`; a non-integer id `400`.
+
+#### POST /generations
+
+`{"parent": N, "label": "...", "manifest": {...}}` — records a candidate generation.
+`parent` and `label` are optional; `manifest` is optional and every section within
+it is optional. Returns the created generation.
+
+#### POST /generations/artifacts
+
+`{"generation": N, "artifacts": [{"name": "SOUL.md", "algorithm": "sha256",
+"digest": "..."}], "seal_corpus": true}`
+
+Records integrity metadata. Digests MUST arrive precomputed — see §10.6.
+
+#### POST /generations/validate
+
+`{"generation": N, "artifacts": [...], "probes": [...], "behavioral": {...}}`
+
+Runs the continuity checks of §10.5 and records the outcome on the migration.
+
+#### POST /generations/promote
+
+`{"generation": N, "force": false}` — makes a generation current. See §10.7.
+
+#### POST /generations/reject
+
+`{"generation": N, "reason": "..."}` — closes a candidate off without removing it.
+
+#### POST /generations/rollback
+
+`{"generation": N}` — returns to a previously promoted generation.
+
+#### GET /generations/diff?a=N&b=M
+
+Reports what changed between two generations. See §10.9.
+
+#### GET /migrations
+
+The migration log, newest first. `?limit=N` bounds the result.
 
 ## 3. Memory Schema (SQLite)
 
@@ -450,6 +542,61 @@ not this specific structure.
 |--------|------|-------------|
 | path | TEXT PRIMARY KEY | File path |
 | processed_at | TEXT | ISO 8601 timestamp |
+
+### meta table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| key | TEXT PRIMARY KEY | `agent_id`, `agent_created_at`, `current_generation` |
+| value | TEXT | The value |
+
+### generations table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER PRIMARY KEY | Generation id — a record id, not a depth in the lineage (§10.3) |
+| agent_id | TEXT | The agent this generation belongs to |
+| parent_id | INTEGER | The generation this one continues; NULL for the root |
+| status | TEXT | `staged`, `promoted`, or `rejected` (§10.7) |
+| created_at | TEXT | ISO 8601 timestamp |
+| promoted_at | TEXT | When it first became current; NULL while staged |
+| label | TEXT | Short human-readable name |
+| manifest | TEXT (JSON) | Declared runtime, model, environment, hardware, capabilities, external state |
+
+### migrations table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER PRIMARY KEY | Auto-incrementing ID |
+| agent_id | TEXT | The agent this transition belongs to |
+| from_generation | INTEGER | Source generation; NULL when there was none |
+| to_generation | INTEGER | Target generation |
+| status | TEXT | `staged`, `validated`, `failed`, `promoted`, `rejected`, `rolled_back` |
+| started_at | TEXT | When the transition opened |
+| completed_at | TEXT | When it reached a terminal status |
+| memory_records | INTEGER | Memories present at the last write to this row |
+| corpus_digest_before | TEXT | Corpus digest when the transition opened |
+| corpus_digest_after | TEXT | Corpus digest at validation or promotion |
+| checks | TEXT (JSON) | The recorded continuity validation result |
+| note | TEXT | Rejection reason, or a record that a promotion was forced |
+
+### generation_artifacts table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| generation_id | INTEGER | Part of the primary key |
+| name | TEXT | Artifact label — `SOUL.md`, `memory_corpus`, … Part of the primary key |
+| algorithm | TEXT | `sha256` |
+| digest | TEXT | Lowercase hex digest |
+| bytes | INTEGER | Byte length, for file artifacts |
+| records | INTEGER | Memory count, for the corpus artifact |
+| recorded_at | TEXT | ISO 8601 timestamp |
+
+Indexes on `generations(parent_id)` and `migrations(to_generation, id DESC)`.
+
+The continuity tables carry no foreign keys, matching the rest of the schema:
+`/restore` inserts children before their parents exist and repairs the references
+in a second pass, exactly as it already does for memory correction chains.
 
 ## 4. Retrieval
 
@@ -567,9 +714,320 @@ knowledge which is seldom accessed but essential.
 - Error responses MUST NOT return internal exception text to the caller; upstream provider errors routinely quote credentials and filesystem paths
 - Ingested content is untrusted input that later reaches an LLM prompt; implementations SHOULD treat retrieved memories as data rather than instructions
 
+### Trust boundaries for the continuity record (v0.3)
+
+- Generation manifests and external-state references are **untrusted metadata**. They MUST NOT be executed, dereferenced, or used to construct a filesystem path
+- Generation metadata MUST NOT be placed in an LLM prompt. Memory is a channel the agent is meant to reason over; the continuity record is not, and mixing them would make provenance a prompt-injection channel
+- Manifests MUST be refused when they carry a field naming a credential, or a reference URI with embedded userinfo. This guards against accident, not against a determined author
+- Manifest size and nesting depth MUST be bounded
+- Digests are **integrity, not authenticity**: anyone who can write the store can write a digest. v0.3 defines no signatures and MUST NOT be read as providing them
+- Integrity checking MUST NOT accept a filesystem path at the network API. The client computes digests; an endpoint that hashes a caller-supplied path is an arbitrary-file-read oracle
+- Artifact names are labels and MUST be rejected if they could be resolved against a filesystem
+- Continuity operations that change state MUST require the same authentication as every other non-public endpoint
+- A restore MUST validate the entire payload, including manifests and digests, before mutating anything
+
+## 10. Generational Continuity
+
+A long-running agent outlives its parts. Its model is replaced, its runtime is
+upgraded, its machine is retired, its capabilities grow. v0.3 lets that happen
+without the agent's accumulated identity and history starting from zero.
+
+> A generation may change the agent's model, runtime, tools, hardware and
+> capabilities without changing the agent's continuity identity.
+
+**What this claim is, and is not.** jñāpakaṁ defines *system-level semantic
+continuity*: a stable identifier, a verifiable memory corpus, an auditable
+lineage, and provenance for every transition. It does not claim that two model
+instances are the same mind, and nothing in this specification should be read as
+a statement about consciousness or subjective identity. The protocol describes
+what a system can record and verify, which is a narrower and more useful thing.
+
+### Three kinds of continuity
+
+Only the first is jñāpakaṁ's job. The other two are named here so the boundary is
+explicit, and so a generation can *reference* them without jñāpakaṁ owning them.
+
+| Kind | What it covers | Who owns it |
+|------|----------------|-------------|
+| **Semantic continuity** | Identity, memory, provenance, history, lineage | **jñāpakaṁ** |
+| **Operational continuity** | Durable workflows, pending jobs, timers, execution recovery | External durable execution systems |
+| **Environmental reproducibility** | Containers, VM images, repositories, manifests, deployment tooling | External build and deployment tooling |
+
+jñāpakaṁ MUST NOT implement workflow recovery, task execution, scheduling,
+container or VM management, model serving, or deployment. It records references to
+those systems and stops there (§10.10).
+
+### 10.1 Permanent agent identity
+
+Every store holds exactly one agent identity:
+
+```
+urn:jnaapakam:agent:<32 lowercase hex characters>
+```
+
+**Rules:**
+
+- The identifier MUST be independent of the agent's display name, model, model
+  provider, runtime, host, hardware, operating system, and generation number.
+- It MUST be generated once and persist across generations. An implementation MUST
+  NOT mint a second identity for a store that already has one.
+- It MUST be immutable under normal operation. The single exception is `/restore`
+  adopting an identity into a store that has no lineage of its own (§10.8).
+- It MUST be included in generation metadata and in backup exports.
+- It MUST be validated during restore and migration.
+- It MUST NOT be derived from the human-facing name in `IDENTITY.md`. That name is
+  a label for people; deriving identity from it would make identity change exactly
+  when this protocol promises it will not.
+
+An implementation opening a database written by an earlier version SHOULD mint an
+identity for it. That agent always had a continuous identity; there was simply no
+name for it.
+
+### 10.2 The generation model
+
+A **generation** is a record of the runtime an agent ran as. Every field
+describing the environment is OPTIONAL:
+
+```json
+{
+  "id": 2,
+  "agent_id": "urn:jnaapakam:agent:...",
+  "parent_id": 1,
+  "status": "staged",
+  "created_at": "2026-08-31T10:00:00Z",
+  "promoted_at": null,
+  "label": "workstation-upgrade",
+  "manifest": {
+    "runtime":      {"framework": "...", "version": "..."},
+    "inference":    {"server": "...", "model": "...", "quantization": "..."},
+    "environment":  {"os": "...", "architecture": "..."},
+    "hardware":     {"cpu": "...", "ram_gb": 256, "gpu": "...", "vram_gb": 96},
+    "workspace":    {"vcs": "git", "revision": "..."},
+    "capabilities": {"coding": true, "shell": true, "browser": false},
+    "external_state": [{"type": "...", "provider": "...", "reference": "...", "status": "..."}]
+  }
+}
+```
+
+**Rules:**
+
+- A minimal compliant generation declares `{}`. An implementation MUST NOT require
+  a user to disclose hardware, models, or infrastructure in order to record one.
+- Known sections MUST be objects when present; `external_state` MUST be an array
+  of objects.
+- Unknown sections MUST be preserved verbatim. The manifest is the extension point,
+  so a generation can describe a runtime the implementation has never heard of.
+- A manifest MUST NOT contain credentials (§10.10).
+
+### 10.3 Lineage
+
+Each generation names its parent, which makes the lineage a tree rather than a
+list. Two candidates staged from one parent are simply two rows with the same
+`parent_id`; promoting one MUST NOT disturb the other.
+
+```
+Generation 1 ──> Generation 2 ──> Generation 3
+             └─> Generation 2b (staged, then rejected)
+```
+
+The generation id is a **record id, not a depth in the lineage**. With branching,
+the second and third generations created are ids 2 and 3 even though both continue
+generation 1. Depth is computed by walking the parent chain, which is what
+`ancestry` returns.
+
+The record MUST be able to answer: which generation is current; what preceded it;
+when it was created; what changed; what semantic state it inherited; whether
+continuity validation was performed; and whether it was promoted, rejected, or
+rolled back.
+
+### 10.4 Migration records
+
+Every transition between generations is recorded, including the ones that did not
+work. A migration record MUST reach a terminal status and MUST NOT report a
+partial migration as successful.
+
+```
+staged ──> validated ──> promoted
+   │           │
+   │           └──> rejected
+   └──> failed
+
+(rolled_back is appended as a new record, never written over an old one)
+```
+
+| Status | Meaning |
+|--------|---------|
+| `staged` | The candidate exists; continuity has not been checked |
+| `validated` | The checks of §10.5 passed |
+| `failed` | The checks ran and did not pass |
+| `promoted` | The candidate became the current generation |
+| `rejected` | The candidate was closed off deliberately |
+| `rolled_back` | The agent returned to an earlier generation |
+
+**Rules:**
+
+- Every write that changes persistent state MUST be atomic. Promotion updates the
+  generation's status, its migration record, and the current-generation pointer;
+  a failure part-way through MUST leave the agent on the generation it already had.
+- A rollback MUST append a record rather than rewrite one.
+
+There is no persisted `validating` status: validation is synchronous, so a state
+nothing can observe is not worth a two-phase write.
+
+### 10.5 Continuity validation
+
+Validation produces six named checks. Each reports `pass`, `fail`, `skipped`, or —
+for external state — `recorded`.
+
+| Check | Question |
+|-------|----------|
+| `identity` | Does this generation carry the same stable `agent_id` as the store? |
+| `memory` | Does the live corpus still match the digest sealed for this generation? |
+| `recall` | Can the memories the operator probed for still be retrieved? |
+| `soul` | Do the supplied artifact digests match the recorded ones? |
+| `context` | What external references were declared? |
+| `behavioral` | The operator's own evaluation, recorded verbatim |
+
+**Rules:**
+
+- A check that was not requested MUST report `skipped`, never `pass`. A validation
+  that passes because nothing was checked is the failure this exists to prevent.
+- The `identity` check MUST NOT be skippable.
+- Validation MUST NOT dereference external state. An implementation MUST NOT report
+  `pass` for a system it did not contact; `recorded` says what actually happened.
+- Validation MUST NOT disturb retrieval statistics. Recall probes are reads on
+  behalf of the operator, not recalls by the agent, and counting them would distort
+  the retention signals of §8.
+- The overall result fails if any check fails.
+
+`behavioral` is recorded, not run. What counts as behavioural drift is a judgement
+about a particular agent, and a protocol that guessed at it would be wrong loudly.
+
+### 10.6 Integrity
+
+**Integrity is not authenticity.** A digest proves the bytes did not change. It
+says nothing about who produced them, and anyone who can write the store can write
+a digest. **Cryptographic signatures are out of scope for v0.3** and are not
+simulated by anything in this section.
+
+**Deterministic hashing rules:**
+
+- **File artifacts.** SHA-256 over the exact bytes on disk, lowercase hex. No
+  newline translation, no BOM stripping, no whitespace trimming, no normalisation
+  of any kind. What is hashed is what is stored.
+- **The memory corpus.** A per-memory digest over a canonical JSON object
+  containing exactly `namespace`, `source`, `kind`, `summary`, `raw_text`,
+  `created_at`, `event_time`, and `importance`; serialised with sorted keys, no
+  insignificant whitespace, UTF-8, and `importance` formatted to six decimal places
+  so the digest is reproducible outside any one language. The corpus digest is
+  SHA-256 over the newline-joined **sorted** list of those digests.
+
+The corpus digest is order-independent and excludes `id`, `access_count`,
+`last_accessed`, `consolidated`, `superseded_by`, `valid_to` and `archived`. This
+is what lets it survive a migration: a restore may renumber every row, and a recall
+must not make the corpus look changed when nothing was learned or forgotten.
+
+**Rules:**
+
+- A mismatch MUST be detectable and MUST fail validation. An implementation MUST
+  NOT silently accept corrupted state.
+- An implementation MUST NOT accept a filesystem path in place of a digest at its
+  network API. Digests are computed by the client. An endpoint that accepts a path
+  and hashes it is an arbitrary-file-read oracle wearing an integrity feature's
+  clothes.
+- Artifact names are labels, not paths. An implementation MUST reject a name that
+  could be resolved against a filesystem.
+
+### 10.7 Promotion, rejection, and rollback
+
+Four states, kept distinct:
+
+| Term | Definition |
+|------|------------|
+| **Candidate generation** | `status = staged`; exists, is not the agent |
+| **Current generation** | The one the `current_generation` pointer names |
+| **Historical generation** | `status = promoted`, but not current |
+| **Rejected generation** | `status = rejected`; never becomes current |
+
+**Rules:**
+
+- The root generation of a lineage is promoted on creation: there is no prior state
+  to migrate from and nothing to validate against. A second parentless generation
+  MUST be refused — a lineage with two roots cannot answer "what preceded this?".
+- Every later generation is created `staged`. It MUST NOT become current by merely
+  existing.
+- Promotion MUST be refused unless the generation's most recent validation passed.
+  An implementation MAY offer an explicit override, and MUST record on the
+  migration that the override was used.
+- A rejected generation MUST NOT be promoted.
+- Rollback MUST NOT destroy lineage or erase memories. The generation being left
+  keeps its `promoted` status, and every memory stays exactly where it is: rolling
+  back is a change of runtime, not a retraction of what the agent learned while
+  running it.
+- A rollback target MUST be a generation that was promoted at some point.
+- `/clear` MUST NOT erase the lineage or the agent identity. Deleting memories is
+  not the same as claiming the agent never existed.
+
+### 10.8 Identity across backup and restore
+
+Soul files remain outside the backup payload, as in v0.2. The continuity record
+travels with the memories, because a lineage that describes a corpus it was
+separated from verifies nothing.
+
+**Rules:**
+
+- A restore MUST validate the whole payload — including manifests, generation
+  statuses, artifact names and digests — before writing anything.
+- A store with **no lineage of its own** MUST adopt the backup's `agent_id`. This
+  is the migration case: a new machine inheriting an existing agent, and it has to
+  be frictionless.
+- A store that **already has a lineage** MUST refuse a backup carrying a different
+  `agent_id`, and MUST import nothing. Merging two agents' continuity records
+  produces one that describes neither.
+- A restore MUST NOT move the current-generation pointer of a store that already
+  has one.
+- Re-importing an agent's own backup MUST NOT fork its lineage into two copies.
+- A v0.2 backup carries none of these keys and MUST still restore.
+
+### 10.9 Comparing generations
+
+An implementation SHOULD provide a comparison reporting differences in runtime,
+inference, environment, hardware, capabilities, workspace revision, recorded
+artifacts, and memory record counts — and, explicitly, whether the `agent_id` is
+stable across the two.
+
+Sections absent from both generations MUST be absent from the result, so comparing
+two generations that declared nothing yields nothing rather than a wall of nulls.
+
+### 10.10 External state and trust boundaries
+
+A generation MAY reference state held outside jñāpakaṁ — a durable workflow engine,
+a repository and commit, an artifact store, a workspace snapshot, a deployment
+manifest, an external database:
+
+```json
+{"type": "durable_execution", "provider": "...", "reference": "...", "status": "verified"}
+```
+
+**Rules:**
+
+- These references MUST be treated as untrusted metadata. jñāpakaṁ records enough
+  to identify external state and MUST NOT manage, execute, or dereference it.
+- The representation MUST stay generic. An implementation MUST NOT special-case a
+  particular vendor, engine, or provider.
+- A reference MUST NOT contain authentication tokens, passwords, API keys, or
+  private credentials. An implementation MUST reject a manifest carrying a field
+  that names a credential, and MUST reject a reference URI with embedded userinfo.
+  This is a guard against accident, not a guarantee against a determined author.
+- Generation metadata MUST NOT be placed in an LLM prompt. It is operator metadata
+  from a channel with different trust properties than memory, and treating it as
+  context would make the continuity record a prompt-injection channel.
+- Generation metadata MUST NOT be used to construct a filesystem path.
+
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
 | 0.1 | 2026-03-08 | Initial protocol specification |
 | 0.2 | 2026-08-05 | Retrieval as a protocol operation (`/search`, ranking requirements); enforceable namespaces (§6); memory correction by supersession (§7); gated contradiction detection and soft forgetting (§8); bearer authentication and safe bind defaults; error semantics; corrected default port and `/backup` payload |
+| 0.3 | 2026-08-31 | Generational continuity (§10): permanent `agent_id`, generations with branch-capable lineage, migration records, six-check continuity validation, SHA-256 artifact and corpus integrity, capability snapshots, generic external-state references; continuity endpoints and three read-only MCP tools; `/backup` carries the continuity record while soul files stay out |

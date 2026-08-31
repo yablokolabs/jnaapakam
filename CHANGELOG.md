@@ -1,0 +1,108 @@
+# Changelog
+
+All notable changes to jñāpakaṁ are recorded here. The protocol specification is
+[PROTOCOL.md](PROTOCOL.md); this file tracks the reference implementation.
+
+## [0.3.0] — 2026-08-31
+
+**Generational continuity.** An agent's model, runtime, tools, hardware and
+capabilities may all change without changing its continuity identity.
+
+This is a claim about systems, not minds: jñāpakaṁ defines a stable identifier, a
+verifiable memory corpus, an auditable lineage and migration provenance. It makes
+no claim about consciousness or subjective identity.
+
+### Added
+
+- **Permanent agent identity** — `urn:jnaapakam:agent:<32 hex>`, minted once and
+  independent of the agent's display name, model, provider, runtime, host,
+  hardware, OS and generation number. Opening an existing database mints one
+  automatically.
+- **Generations** — a portable record of the runtime an agent ran as, with an
+  optional manifest describing runtime, inference, environment, hardware,
+  workspace revision, capabilities and external state. Every section is optional;
+  a minimal generation is `{}`. Unknown sections are preserved verbatim.
+- **Branch-capable lineage** — generations name a parent, so two candidates staged
+  from one parent do not corrupt each other's ancestry.
+- **Migration records** — provenance for every transition, with statuses `staged`,
+  `validated`, `failed`, `promoted`, `rejected` and `rolled_back`.
+- **Continuity validation** — six checks (`identity`, `memory`, `recall`, `soul`,
+  `context`, `behavioral`), each reporting its own result. A check that was not
+  requested reports `skipped`, never `pass`.
+- **Integrity metadata** — SHA-256 over the exact bytes of soul files, plus an
+  order-independent digest over the memory corpus that survives a restore
+  renumbering every row.
+- **Endpoints** — `GET /agent`, `GET /generations`, `GET /generations/diff`,
+  `GET /migrations`; `POST /generations`, `/generations/artifacts`,
+  `/generations/validate`, `/generations/promote`, `/generations/reject`,
+  `/generations/rollback`. All behind the existing bearer authentication.
+- **MCP tools** — `get_agent_identity`, `list_generations`, `diff_generations`.
+  Read-only: deciding which runtime *is* the agent stays an operator action, the
+  same reason `/clear` and `/restore` are not MCP tools.
+- **CLI** — `jnaapakam agent` and `jnaapakam generation {list,show,create,seal,
+  validate,promote,reject,rollback,diff}`. These open the database directly, so
+  continuity works offline with no server, token or network. `validate` exits
+  non-zero on failure, which makes it usable as a migration gate.
+- **Schema** — `meta`, `generations`, `migrations` and `generation_artifacts`
+  tables; `PRAGMA user_version` 3 → 4.
+- **Example** — [examples/generational-continuity](examples/generational-continuity/),
+  a vendor-neutral Generation 1 → Generation 2 walkthrough.
+
+### Changed
+
+- `/backup` now carries `agent_id`, `current_generation`, `corpus_digest`,
+  `generations`, `migrations` and `artifacts`. Soul files remain excluded, exactly
+  as in v0.2 — only their digests travel.
+- `/restore` adopts the backup's `agent_id` when the target store has no lineage
+  of its own, and refuses a different agent when it does. Re-importing an agent's
+  own backup no longer forks its lineage.
+- `version` reported by `/status` and `/backup` is now `"0.3"`; the server and MCP
+  `serverInfo` report `0.3.0`.
+- The full-text index backfill is gated on `user_version < 3` rather than on the
+  current schema version, so future schema bumps no longer trigger a pointless
+  reindex.
+
+### Security
+
+- Generation manifests and external-state references are treated as untrusted
+  metadata: never executed, never dereferenced, never used to build a filesystem
+  path, and never placed in an LLM prompt.
+- Manifests carrying a field named like a credential, or a reference URI with
+  embedded userinfo, are refused. Manifest size and nesting depth are bounded.
+- The server never reads a file to hash it. Digests arrive precomputed; the CLI
+  does the reading, locally, restricted to soul filenames in a directory the
+  operator names. An endpoint that hashes a caller-supplied path would be an
+  arbitrary-file-read oracle.
+- Artifact names must be plain labels and are rejected if they could be resolved
+  against a filesystem.
+- `/restore` validates the entire payload, including manifests and digests, before
+  mutating anything.
+
+### Not in this release
+
+- **Signatures.** v0.3 provides integrity, not authenticity: a digest proves the
+  bytes did not change, but anyone who can write the store can write a digest.
+  Do not read one as the other.
+
+### Compatibility
+
+- Every v0.2 test passes unchanged.
+- A v0.2 database opens and upgrades in place, gaining an identity without losing
+  a memory.
+- A v0.2 backup still restores.
+- A v0.3 backup restored by a v0.2 implementation imports its memories and
+  consolidations and ignores the continuity keys — the lineage is dropped, not
+  corrupted.
+- The only breaking change is the `version` string, and only for a client
+  asserting it exactly.
+
+## [0.2.0]
+
+Retrieval as a protocol operation (`/search`, ranking requirements); enforceable
+namespaces; memory correction by supersession; gated contradiction detection and
+soft forgetting; bearer authentication and safe bind defaults; error semantics;
+corrected default port and `/backup` payload.
+
+## [0.1.0]
+
+Initial protocol specification and reference implementation.

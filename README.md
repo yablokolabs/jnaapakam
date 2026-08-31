@@ -14,6 +14,7 @@ jñāpakaṁ (Sanskrit: *memory, reminder*) is an open standard for persisting A
 - 🧠 **Memory Protocol** — Ingest, retrieve, consolidate, and query agent memories over HTTP or MCP
 - 🔍 **Real retrieval** — Full-text search with BM25 ranking, using nothing but stock SQLite
 - 🔄 **Backup & Restore** — Never lose your agent's accumulated knowledge
+- 🧬 **Generational Continuity** — Change the model, runtime, machine and GPU without changing who the agent is
 - 🔌 **Framework Agnostic** — Works with any agent framework, any LLM provider
 
 ## The Problem
@@ -26,6 +27,7 @@ Some frameworks bolt on vector databases or conversation logs, but there's no st
 - Persist structured memories across sessions
 - Migrate an agent's "soul" between platforms
 - Back up and restore agent knowledge
+- Carry an agent's identity and history forward when its model, runtime or hardware is replaced
 
 **jñāpakaṁ fixes this.**
 
@@ -291,16 +293,32 @@ Three standard files that any agent framework can read.
 | `/backup` | GET | Export memories and consolidations as JSON |
 | `/restore` | POST | Import from backup JSON |
 | `/mcp` | POST | MCP JSON-RPC endpoint (also served on `/`) |
+| `/agent` | GET | This agent's permanent identity and current generation |
+| `/generations` | GET | List generations; `?id=N` adds ancestry and artifacts |
+| `/generations` | POST | Record a candidate generation `{"parent": N, "label": "...", "manifest": {...}}` |
+| `/generations/artifacts` | POST | Record digests `{"generation": N, "artifacts": [...], "seal_corpus": true}` |
+| `/generations/validate` | POST | Run the continuity checks and record the outcome |
+| `/generations/promote` | POST | Make a generation current `{"generation": N, "force": false}` |
+| `/generations/reject` | POST | Close a candidate off `{"generation": N, "reason": "..."}` |
+| `/generations/rollback` | POST | Return to an earlier generation `{"generation": N}` |
+| `/generations/diff` | GET | Compare two generations (`?a=1&b=2`) |
+| `/migrations` | GET | The migration log, newest first |
 
 Prefer `/search` over `/query` when your agent should reason over the memories itself — it keeps provenance intact and skips an LLM call.
 
 ### MCP tools
 
-`search_memory`, `ingest_memory`, `query_memory`, `list_memories`, `get_memory_status`, `consolidate_memories`.
+`search_memory`, `ingest_memory`, `query_memory`, `list_memories`, `get_memory_status`,
+`consolidate_memories`, `get_agent_identity`, `list_generations`, `diff_generations`.
 
 Every tool takes an optional `namespace` argument. The surface is deliberately
 small: tool definitions consume context on every request, so memory types arrive as
 parameters rather than as new tools.
+
+The three generational tools are **read-only**. Creating, promoting and rolling back
+a generation decide which runtime *is* the agent, and that is an operator decision —
+the same reason `/clear` and `/restore` are not MCP tools. A model can inspect its
+own lineage; it cannot rewrite it.
 
 ## Configuration
 
@@ -330,7 +348,24 @@ jnaapakam serve [options]
   --consolidate-every MIN  Consolidation interval (default: 30)
 
 jnaapakam init [directory]   Create SOUL.md / IDENTITY.md / MEMORY.md
+
+jnaapakam agent [--db PATH]  Show this agent's permanent identity
+
+jnaapakam generation list                       List every generation
+jnaapakam generation show ID                    Show one generation in full
+jnaapakam generation create [--parent N] [--label L] [--manifest FILE]
+jnaapakam generation seal ID [--soul-dir DIR]   Hash the soul files and memory corpus
+jnaapakam generation validate ID [--soul-dir DIR]
+jnaapakam generation promote ID [--force]       Make a generation current
+jnaapakam generation reject ID [--reason R]
+jnaapakam generation rollback ID
+jnaapakam generation diff A B                   Compare two generations
 ```
+
+Every `generation` command takes `--db PATH` and opens the database directly, so
+continuity works offline with no server, no token, and no network. `validate`
+exits non-zero when continuity fails, which makes it usable as a migration gate
+in a script.
 
 ## LLM Provider Support
 
@@ -467,6 +502,158 @@ before live ones.
 > The literature publishes no agreed decay formula, so these weights are defaults to
 > tune, not findings. Nothing is ever destroyed automatically.
 
+## Generational Continuity
+
+A resident agent outlives its parts. It may start on a modest workstation with a
+small local model and later move to far stronger hardware. v0.3 lets that happen
+without its accumulated identity and history starting from zero.
+
+> A generation may change the agent's model, runtime, tools, hardware and
+> capabilities without changing the agent's continuity identity.
+
+This is a claim about **systems**, not about minds. jñāpakaṁ defines a stable
+identifier, a verifiable memory corpus, an auditable lineage, and provenance for
+every transition. It does not claim that two model instances are the same
+consciousness, and nothing here should be read that way.
+
+### Three kinds of continuity — only one is ours
+
+| Kind | What it covers | Who owns it |
+|------|----------------|-------------|
+| **Semantic continuity** | Identity, memory, provenance, history, lineage | **jñāpakaṁ** |
+| **Operational continuity** | Durable workflows, pending jobs, timers, execution recovery | Your durable execution system |
+| **Environmental reproducibility** | Containers, VM images, repositories, deployment manifests | Your build and deploy tooling |
+
+jñāpakaṁ **references** the other two and never owns them. It is not a workflow
+engine, a task queue, a container orchestrator, an inference server, or a
+deployment platform, and it takes no dependency on any particular one.
+
+```
+Agent runtime
+   ├── jñāpakaṁ ................ identity, memory, lineage, migration provenance
+   ├── durable execution ....... referenced, never managed
+   ├── inference server ........ referenced, never managed
+   └── workspace / VCS ......... referenced, never managed
+```
+
+### Permanent identity
+
+Every store holds one identity, minted once and stable forever after:
+
+```bash
+$ jnaapakam agent
+agent:       urn:jnaapakam:agent:9f2c1e7a4b8d40f1a3c6e9b2d5f80147
+created:     2026-08-31T09:12:44+00:00
+current:     generation 2
+generations: 2
+```
+
+It is independent of the agent's display name, model, provider, runtime, host,
+hardware, OS and generation number. The name in `IDENTITY.md` is a label for
+people; identity is not derived from it, because then identity would change
+exactly when this protocol promises it will not. Opening a v0.2 database mints
+one automatically — that agent always had a continuous identity, there was just
+never a name for it.
+
+### Migrating a generation
+
+Everything the environment declares is optional. A minimal generation is `{}`;
+disclosing your hardware, model, or infrastructure is never required.
+
+```bash
+# On the new machine, restore the agent's semantic state
+curl -X POST http://localhost:8889/restore -d @backup.json
+
+# Record what changed about the runtime
+jnaapakam generation create --parent 1 --label upgrade --manifest gen2.json
+
+# Seal the soul files and the memory corpus, then check continuity
+jnaapakam generation seal 2 --soul-dir ./soul
+jnaapakam generation validate 2 --soul-dir ./soul
+
+# Only a generation that validated can become the agent
+jnaapakam generation promote 2
+```
+
+`validate` runs six checks, and one that was not requested reports `skipped`
+rather than `pass` — a validation that passes because nothing was checked is
+exactly the failure this exists to prevent:
+
+```
+  identity     pass     agent_id urn:jnaapakam:agent:9f2c1e7a…
+  memory       pass     1842 records match the sealed corpus digest
+  recall       pass     3 recall probes resolved
+  soul         pass     3 artifacts match their recorded digests
+  context      recorded 1 external references recorded; verifying them is the
+                        responsibility of the systems that own them
+  behavioral   skipped  no behavioural evaluation supplied
+generation 2: continuity verified
+```
+
+Promotion is refused unless the last validation passed. `--force` exists for the
+operator who has decided anyway, and writes onto the migration record that the
+override was used — so it is never invisible afterwards.
+
+### Comparing generations
+
+```bash
+$ jnaapakam generation diff 1 2
+Generation 1 -> Generation 2
+
+agent_id:  unchanged  urn:jnaapakam:agent:9f2c1e7a4b8d40f1a3c6e9b2d5f80147
+
+inference:
+  model: small-9b -> large-70b
+hardware:
+  vram_gb: 12 -> 96
+  ram_gb: 32 -> 256
+capabilities:
+  + long_context: True
+
+memory:    1842 -> 1842 records (unchanged)
+SOUL.md:   unchanged
+```
+
+### Rollback keeps history
+
+If a promoted generation turns out badly, roll back. The generation you leave
+keeps its `promoted` status, the migration log gains a `rolled_back` entry rather
+than losing the old one, and **no memory is touched**. Rolling back is a change of
+runtime, not a retraction of what the agent learned while running it.
+
+```bash
+jnaapakam generation rollback 1
+curl http://localhost:8889/migrations      # the whole history, still intact
+```
+
+`/clear` does not erase the lineage or the identity either. Deleting memories is
+not the same as claiming the agent never existed.
+
+### Integrity, not authenticity
+
+Digests are SHA-256 over the exact bytes on disk — no newline translation, no BOM
+stripping, no normalisation. The memory corpus gets one order-independent digest so
+it survives a restore that renumbers every row, while a recall (which bumps access
+counters) leaves it unchanged.
+
+> [!IMPORTANT]
+> A digest proves the bytes did not change. It says nothing about *who* produced
+> them: anyone who can write the store can write a digest. **v0.3 defines no
+> signatures.** Do not read integrity as authenticity.
+
+The server never opens a file to hash it. Digests arrive precomputed, and the CLI
+does the reading — locally, from a directory you name, restricted to soul
+filenames. An endpoint that accepts a path and hashes it is an arbitrary-file-read
+oracle wearing an integrity feature's clothes.
+
+Generation manifests are untrusted metadata: never executed, never dereferenced,
+never used to build a path, and never placed in an LLM prompt. Manifests carrying a
+credential field, or a reference URI with embedded userinfo, are refused outright.
+
+See [PROTOCOL.md §10](PROTOCOL.md) for the normative rules and
+[examples/generational-continuity](examples/generational-continuity/) for a full
+Generation 1 → Generation 2 walkthrough.
+
 ## Deployment
 
 ### systemd (Linux)
@@ -511,11 +698,13 @@ CMD ["jnaapakam", "serve"]
 - [x] Validity intervals (`valid_from` / `valid_to`) and usage tracking
 - [x] Automatic contradiction detection driving supersession
 - [x] Soft forgetting: retention scoring, archive and prune
+- [x] Generational continuity: stable `agent_id`, lineage, migration provenance, integrity
 - [ ] Optional embeddings as a runtime-detected capability
 - [ ] Pluggable storage backends (Postgres/pgvector, embedded graph)
 - [ ] Encryption at rest
 - [ ] Memory expiry and retention policies
 - [ ] Dashboard UI
+- [ ] Signed continuity records (v0.3 provides integrity, not authenticity)
 
 ## Philosophy
 
@@ -527,6 +716,7 @@ jñāpakaṁ is designed to be:
 - **Portable** — Standard files and APIs. Move between frameworks freely.
 - **Respectful** — Your agent's memories belong to you. Always local-first.
 - **Honest** — If an extraction fails you get an error, not a quietly degraded memory.
+- **Continuous** — An agent's identity survives its parts. Replacing the model is not a new agent.
 
 ## Contributing
 
