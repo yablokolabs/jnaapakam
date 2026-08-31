@@ -1,10 +1,11 @@
-"""Command line entry point: `jnaapakam serve` and `jnaapakam init`."""
+"""Command line entry point: `jnaapakam serve`, `init`, `agent`, and `generation`."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import signal
@@ -13,12 +14,18 @@ from pathlib import Path
 
 from aiohttp import web
 
+from . import lineage
 from .config import Config, ConfigError
 from .llm import chat
 from .server import CONSOLIDATE_KEY, INGEST_KEY, STORE_KEY, build_app
 from .store import Store
 
 log = logging.getLogger("jnaapakam")
+
+# The only filenames `generation seal` will read. An allowlist rather than a
+# directory sweep: a continuity record should contain the agent's soul, not
+# whatever else happens to be sitting in the folder — a stray .env in particular.
+SOUL_FILES = ("SOUL.md", "IDENTITY.md", "MEMORY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md")
 
 TEXT_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".log", ".xml", ".yaml", ".yml"}
 
@@ -172,6 +179,289 @@ def _serve_command(args) -> int:
     return 0
 
 
+# ---- generational continuity -------------------------------------------
+#
+# These commands open the SQLite file directly, the way `init` writes soul files
+# directly. Continuity is an operator concern and works offline: nothing here
+# needs a running server, a token, or a network.
+
+
+@contextlib.contextmanager
+def _open_store(args):
+    store = Store(Config.from_env(db_path=args.db).db_path).initialize()
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+def _guarded(args, action) -> int:
+    """Run a store command, turning a refusal into an exit code rather than a traceback."""
+    try:
+        with _open_store(args) as store:
+            return action(store)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _soul_digests(directory: Path) -> dict[str, dict]:
+    """Hash the soul files present in a directory.
+
+    This is the one place jnaapakam reads continuity artifacts from disk, and it
+    reads only the names in SOUL_FILES from the directory the operator named. The
+    server never does this at all — an endpoint that hashes a caller-supplied path
+    is a file-read oracle, not an integrity feature.
+    """
+    digests = {}
+    for name in SOUL_FILES:
+        path = directory / name
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        digests[name] = {
+            "name": name,
+            "algorithm": "sha256",
+            "digest": lineage.digest_bytes(data),
+            "bytes": len(data),
+        }
+    return digests
+
+
+def _describe_generation(generation: dict) -> str:
+    parent = f"parent {generation['parent_id']}" if generation["parent_id"] else "root"
+    label = f"  {generation['label']}" if generation["label"] else ""
+    return (
+        f"  {generation['id']:>3}  {generation['status']:<9} {generation['created_at'][:19]}  "
+        f"({parent}){label}"
+    )
+
+
+def _agent_command(args) -> int:
+    def action(store):
+        agent = store.agent()
+        current = agent["current_generation"]
+        print(f"agent:       {agent['agent_id']}")
+        print(f"created:     {agent['created_at']}")
+        print(f"current:     generation {current}" if current else "current:     none")
+        print(f"generations: {agent['generations']}")
+        return 0
+
+    return _guarded(args, action)
+
+
+def _generation_list(args) -> int:
+    def action(store):
+        generations = store.list_generations()
+        if not generations:
+            print("no generations recorded yet")
+            return 0
+        current = store.current_generation()
+        for generation in generations:
+            marker = "*" if current and generation["id"] == current["id"] else " "
+            print(marker + _describe_generation(generation))
+        return 0
+
+    return _guarded(args, action)
+
+
+def _generation_show(args) -> int:
+    def action(store):
+        generation = store.get_generation(args.id)
+        if generation is None:
+            print(f"error: no generation with id {args.id}", file=sys.stderr)
+            return 1
+        print(f"generation:  {generation['id']} ({generation['status']})")
+        print(f"agent:       {generation['agent_id']}")
+        print(f"parent:      {generation['parent_id'] or 'none'}")
+        print(f"label:       {generation['label'] or 'none'}")
+        print(f"created:     {generation['created_at']}")
+        print(f"ancestry:    {store.ancestry(generation['id']) or 'none'}")
+        print("manifest:")
+        print(json.dumps(generation["manifest"], indent=2, sort_keys=True))
+        artifacts = store.artifacts(generation["id"])
+        if artifacts:
+            print("artifacts:")
+            for artifact in artifacts:
+                print(f"  {artifact['name']:<16} {artifact['algorithm']}:{artifact['digest'][:16]}…")
+        return 0
+
+    return _guarded(args, action)
+
+
+def _generation_create(args) -> int:
+    manifest = {}
+    if args.manifest:
+        try:
+            manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+        except OSError as exc:
+            print(f"error: cannot read {args.manifest}: {exc}", file=sys.stderr)
+            return 1
+        except ValueError as exc:
+            print(f"error: {args.manifest} is not valid JSON: {exc}", file=sys.stderr)
+            return 1
+
+    def action(store):
+        generation = store.create_generation(
+            parent=args.parent, label=args.label or "", manifest=manifest
+        )
+        print(f"created generation {generation['id']} ({generation['status']})")
+        return 0
+
+    return _guarded(args, action)
+
+
+def _generation_seal(args) -> int:
+    digests = _soul_digests(Path(args.soul_dir)) if args.soul_dir else {}
+
+    def action(store):
+        if digests:
+            store.record_artifacts(args.id, list(digests.values()))
+            for artifact in digests.values():
+                print(f"  {artifact['name']:<16} sha256:{artifact['digest']}")
+        corpus = store.seal_corpus(args.id)
+        print(f"  {'memory_corpus':<16} sha256:{corpus['digest']}  ({corpus['records']} records)")
+        print(f"sealed generation {args.id}")
+        return 0
+
+    return _guarded(args, action)
+
+
+def _generation_validate(args) -> int:
+    found = _soul_digests(Path(args.soul_dir)) if args.soul_dir else {}
+
+    def action(store):
+        recorded = {
+            artifact["name"]
+            for artifact in store.artifacts(args.id)
+            if artifact["name"] != lineage.CORPUS_ARTIFACT
+        }
+        # Sealed but no longer on disk: reported here rather than quietly dropped,
+        # because a missing soul file is exactly the kind of loss this catches.
+        missing = sorted(recorded - set(found))
+        result = store.validate_continuity(
+            args.id,
+            artifacts=list(found.values()) or None,
+            probes=[{"query": q} for q in args.probe] or None,
+        )
+        for name, check in result["checks"].items():
+            print(f"  {name:<12} {check['status']:<8} {check['detail']}")
+        if missing:
+            print(f"  {'artifacts':<12} {'fail':<8} sealed but missing from disk: {', '.join(missing)}")
+        passed = result["passed"] and not missing
+        print(f"generation {args.id}: {'continuity verified' if passed else 'validation FAILED'}")
+        return 0 if passed else 1
+
+    return _guarded(args, action)
+
+
+def _generation_promote(args) -> int:
+    def action(store):
+        result = store.promote_generation(args.id, force=args.force)
+        print(f"promoted generation {result['generation']}", end="")
+        print(" (forced)" if result["forced"] else "")
+        return 0
+
+    return _guarded(args, action)
+
+
+def _generation_reject(args) -> int:
+    def action(store):
+        store.reject_generation(args.id, reason=args.reason or "")
+        print(f"rejected generation {args.id}")
+        return 0
+
+    return _guarded(args, action)
+
+
+def _generation_rollback(args) -> int:
+    def action(store):
+        result = store.rollback_generation(args.id)
+        print(f"rolled back to generation {result['generation']}")
+        return 0
+
+    return _guarded(args, action)
+
+
+def _generation_diff(args) -> int:
+    def action(store):
+        difference = store.diff_generations(args.a, args.b)
+        print(f"Generation {args.a} -> Generation {args.b}\n")
+        identity = difference["agent_id"]
+        print(f"agent_id:  {'unchanged' if identity['stable'] else 'DIFFERENT'}  {identity['value']}\n")
+        for section, change in difference["sections"].items():
+            print(f"{section}:")
+            for field, (before, after) in change.get("changed", {}).items():
+                print(f"  {field}: {before} -> {after}")
+            for field, value in change.get("added", {}).items():
+                print(f"  + {field}: {value}")
+            for field, value in change.get("removed", {}).items():
+                print(f"  - {field}: {value}")
+            print()
+        records = difference["memory"]["records"]
+        print(f"memory:    {records[0]} -> {records[1]} records ({difference['memory']['corpus']})")
+        for name, state in difference["artifacts"].items():
+            print(f"{name + ':':<16}{state}")
+        return 0
+
+    return _guarded(args, action)
+
+
+def _add_generation_commands(sub) -> None:
+    generation = sub.add_parser("generation", help="Inspect and manage generational continuity")
+    actions = generation.add_subparsers(dest="generation_command", required=True)
+
+    def with_db(parser):
+        parser.add_argument("--db", default=None, help="SQLite database path")
+        return parser
+
+    listing = with_db(actions.add_parser("list", help="List every generation"))
+    listing.set_defaults(func=_generation_list)
+
+    show = with_db(actions.add_parser("show", help="Show one generation in full"))
+    show.add_argument("id", type=int)
+    show.set_defaults(func=_generation_show)
+
+    create = with_db(actions.add_parser("create", help="Record a new generation"))
+    create.add_argument("--parent", type=int, default=None, help="Generation this one continues")
+    create.add_argument("--label", default=None, help="Short human-readable name")
+    create.add_argument("--manifest", default=None, help="JSON file describing runtime/model/hardware")
+    create.set_defaults(func=_generation_create)
+
+    seal = with_db(actions.add_parser("seal", help="Record digests of the soul files and memory corpus"))
+    seal.add_argument("id", type=int)
+    seal.add_argument("--soul-dir", default=None, dest="soul_dir", help="Directory holding SOUL.md etc.")
+    seal.set_defaults(func=_generation_seal)
+
+    validate = with_db(actions.add_parser("validate", help="Check a generation's continuity"))
+    validate.add_argument("id", type=int)
+    validate.add_argument("--soul-dir", default=None, dest="soul_dir")
+    validate.add_argument(
+        "--probe", action="append", default=[],
+        help="Search text that must still return a memory. Repeatable.",
+    )
+    validate.set_defaults(func=_generation_validate)
+
+    promote = with_db(actions.add_parser("promote", help="Make a generation the current one"))
+    promote.add_argument("id", type=int)
+    promote.add_argument("--force", action="store_true", help="Promote without a passing validation")
+    promote.set_defaults(func=_generation_promote)
+
+    reject = with_db(actions.add_parser("reject", help="Close a candidate generation off"))
+    reject.add_argument("id", type=int)
+    reject.add_argument("--reason", default=None)
+    reject.set_defaults(func=_generation_reject)
+
+    rollback = with_db(actions.add_parser("rollback", help="Return to an earlier generation"))
+    rollback.add_argument("id", type=int)
+    rollback.set_defaults(func=_generation_rollback)
+
+    diff = with_db(actions.add_parser("diff", help="Compare two generations"))
+    diff.add_argument("a", type=int)
+    diff.add_argument("b", type=int)
+    diff.set_defaults(func=_generation_diff)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jnaapakam", description="AI agent memory persistence")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -191,6 +481,12 @@ def build_parser() -> argparse.ArgumentParser:
     init = sub.add_parser("init", help="Create SOUL.md / IDENTITY.md / MEMORY.md")
     init.add_argument("directory", nargs="?", default=".", help="Where to write the soul files")
     init.set_defaults(func=_init)
+
+    agent = sub.add_parser("agent", help="Show this agent's permanent identity")
+    agent.add_argument("--db", default=None, help="SQLite database path")
+    agent.set_defaults(func=_agent_command)
+
+    _add_generation_commands(sub)
 
     return parser
 

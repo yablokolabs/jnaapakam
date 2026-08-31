@@ -51,7 +51,7 @@ Answer the question based ONLY on the provided memories. Reference memory IDs li
 If no relevant memories exist, say so honestly. Be thorough but concise."""
 
 MCP_PROTOCOL_VERSION = "2025-03-26"
-MCP_SERVER_INFO = {"name": "jnaapakam", "version": "0.2.0"}
+MCP_SERVER_INFO = {"name": "jnaapakam", "version": "0.3.0"}
 
 NAMESPACE_PARAM = {
     "type": "string",
@@ -151,6 +151,36 @@ MCP_TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {"namespace": NAMESPACE_PARAM},
+            "additionalProperties": False,
+        },
+    },
+    # The generational tools are read-only by design. Creating, promoting and
+    # rolling back a generation decide which runtime *is* the agent, and that is
+    # an operator decision — the same reason /clear and /restore are not MCP
+    # tools. A model can inspect its own lineage; it cannot rewrite it.
+    {
+        "name": "get_agent_identity",
+        "description": (
+            "Return this agent's permanent identifier and current generation. The identifier is "
+            "stable across changes of model, runtime, host and hardware."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "list_generations",
+        "description": "List the agent's generations with their status and declared environment.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "diff_generations",
+        "description": "Compare two generations: runtime, model, environment, hardware, capabilities.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "a": {"type": "integer", "description": "The earlier generation id."},
+                "b": {"type": "integer", "description": "The later generation id."},
+            },
+            "required": ["a", "b"],
             "additionalProperties": False,
         },
     },
@@ -313,7 +343,7 @@ def build_app(config: Config, chat) -> web.Application:
         return web.json_response(
             {
                 "name": "jnaapakam",
-                "version": "0.2.0",
+                "version": "0.3.0",
                 "transport": "streamable-http",
                 "mcp_endpoint": "/mcp",
                 "tools": [tool["name"] for tool in MCP_TOOLS],
@@ -322,7 +352,7 @@ def build_app(config: Config, chat) -> web.Application:
 
     async def handle_health(request):
         """Liveness for platform startup probes: reachable without credentials."""
-        return web.json_response({"status": "ok", "name": "jnaapakam", "version": "0.2.0"})
+        return web.json_response({"status": "ok", "name": "jnaapakam", "version": "0.3.0"})
 
     async def handle_status(request):
         namespace = request.query.get("namespace")
@@ -440,6 +470,130 @@ def build_app(config: Config, chat) -> web.Application:
             )
         return web.json_response({"status": "superseded", "old_id": old_id, "new_id": new_id})
 
+    # ---- generational continuity ---------------------------------------
+
+    def generation_id(raw, name: str = "generation") -> int:
+        if raw is None or raw == "":
+            raise web.HTTPBadRequest(reason=f"missing '{name}'")
+        # bool is an int in Python; {"generation": true} would become generation 1.
+        if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+            raise web.HTTPBadRequest(reason=f"'{name}' must be an integer")
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(reason=f"'{name}' must be an integer") from None
+
+    async def require_generation(identifier: int) -> dict:
+        generation = await in_thread(store.get_generation, identifier)
+        if generation is None:
+            raise web.HTTPNotFound(reason=f"no generation with id {identifier}")
+        return generation
+
+    async def handle_agent(request):
+        return web.json_response(await in_thread(store.agent))
+
+    async def handle_generations(request):
+        raw = request.query.get("id")
+        if raw:
+            identifier = generation_id(raw, "id")
+            generation = await require_generation(identifier)
+            return web.json_response(
+                {
+                    "generation": generation,
+                    "ancestry": await in_thread(store.ancestry, identifier),
+                    "artifacts": await in_thread(store.artifacts, identifier),
+                }
+            )
+        generations = await in_thread(store.list_generations)
+        current = await in_thread(store.current_generation)
+        return web.json_response(
+            {
+                "generations": generations,
+                "count": len(generations),
+                "current_generation": current["id"] if current else None,
+            }
+        )
+
+    async def handle_create_generation(request):
+        body = await _json_body(request)
+        parent = body.get("parent")
+        if parent is not None:
+            parent = generation_id(parent, "parent")
+            await require_generation(parent)
+        return web.json_response(
+            await in_thread(
+                store.create_generation, parent, body.get("label") or "", body.get("manifest")
+            )
+        )
+
+    async def handle_generation_artifacts(request):
+        """Record digests the caller computed, and optionally seal the memory corpus.
+
+        Digests arrive precomputed: the server never opens a file to hash it, so
+        no request can turn integrity checking into a filesystem read.
+        """
+        body = await _json_body(request)
+        identifier = generation_id(body.get("generation"))
+        await require_generation(identifier)
+        if body.get("artifacts") is None and not body.get("seal_corpus"):
+            raise web.HTTPBadRequest(reason="supply 'artifacts', 'seal_corpus', or both")
+        recorded = corpus = None
+        if body.get("artifacts") is not None:
+            recorded = await in_thread(store.record_artifacts, identifier, body["artifacts"])
+        if body.get("seal_corpus"):
+            corpus = await in_thread(store.seal_corpus, identifier, body.get("namespace"))
+        return web.json_response(
+            {"status": "recorded", "generation": identifier, "artifacts": recorded, "corpus": corpus}
+        )
+
+    async def handle_validate_generation(request):
+        body = await _json_body(request)
+        identifier = generation_id(body.get("generation"))
+        await require_generation(identifier)
+        return web.json_response(
+            await in_thread(
+                store.validate_continuity,
+                identifier,
+                body.get("artifacts"),
+                body.get("probes"),
+                body.get("behavioral"),
+            )
+        )
+
+    async def handle_promote_generation(request):
+        body = await _json_body(request)
+        identifier = generation_id(body.get("generation"))
+        await require_generation(identifier)
+        return web.json_response(
+            await in_thread(store.promote_generation, identifier, bool(body.get("force")))
+        )
+
+    async def handle_reject_generation(request):
+        body = await _json_body(request)
+        identifier = generation_id(body.get("generation"))
+        await require_generation(identifier)
+        return web.json_response(
+            await in_thread(store.reject_generation, identifier, str(body.get("reason") or ""))
+        )
+
+    async def handle_rollback_generation(request):
+        body = await _json_body(request)
+        identifier = generation_id(body.get("generation"))
+        await require_generation(identifier)
+        return web.json_response(await in_thread(store.rollback_generation, identifier))
+
+    async def handle_generation_diff(request):
+        before = generation_id(request.query.get("a"), "a")
+        after = generation_id(request.query.get("b"), "b")
+        await require_generation(before)
+        await require_generation(after)
+        return web.json_response(await in_thread(store.diff_generations, before, after))
+
+    async def handle_migrations(request):
+        limit = _positive_int(request.query.get("limit"), "limit", 50, maximum=500)
+        entries = await in_thread(store.migrations, limit)
+        return web.json_response({"migrations": entries, "count": len(entries)})
+
     async def handle_backup(request):
         return web.json_response(await in_thread(store.export_all))
 
@@ -491,6 +645,30 @@ def build_app(config: Config, chat) -> web.Application:
             return json_result(await in_thread(store.stats, namespace or None))
         if name == "consolidate_memories":
             return json_result(await consolidate(namespace))
+        if name == "get_agent_identity":
+            return json_result(await in_thread(store.agent))
+        if name == "list_generations":
+            generations = await in_thread(store.list_generations)
+            current = await in_thread(store.current_generation)
+            return json_result(
+                {
+                    "generations": generations,
+                    "count": len(generations),
+                    "current_generation": current["id"] if current else None,
+                }
+            )
+        if name == "diff_generations":
+            def required_generation(key):
+                value = arguments.get(key)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise MCPProtocolError(-32602, f"Argument must be a generation id: {key}")
+                return value
+
+            before, after = required_generation("a"), required_generation("b")
+            for identifier in (before, after):
+                if await in_thread(store.get_generation, identifier) is None:
+                    raise MCPProtocolError(-32602, f"No generation with id {identifier}")
+            return json_result(await in_thread(store.diff_generations, before, after))
         raise MCPProtocolError(-32602, f"Unknown tool: {name}")
 
     async def dispatch(method: str, params: dict):
@@ -588,6 +766,16 @@ def build_app(config: Config, chat) -> web.Application:
     app.router.add_get("/search", handle_search)
     app.router.add_get("/query", handle_query)
     app.router.add_get("/backup", handle_backup)
+    app.router.add_get("/agent", handle_agent)
+    app.router.add_get("/generations", handle_generations)
+    app.router.add_get("/generations/diff", handle_generation_diff)
+    app.router.add_get("/migrations", handle_migrations)
+    app.router.add_post("/generations", handle_create_generation)
+    app.router.add_post("/generations/artifacts", handle_generation_artifacts)
+    app.router.add_post("/generations/validate", handle_validate_generation)
+    app.router.add_post("/generations/promote", handle_promote_generation)
+    app.router.add_post("/generations/reject", handle_reject_generation)
+    app.router.add_post("/generations/rollback", handle_rollback_generation)
     app.router.add_post("/ingest", handle_ingest)
     app.router.add_post("/consolidate", handle_consolidate)
     app.router.add_post("/delete", handle_delete)

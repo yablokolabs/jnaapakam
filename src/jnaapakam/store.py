@@ -15,13 +15,17 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 
-from . import retention, retrieval
+from . import lineage, retention, retrieval
 
 log = logging.getLogger("jnaapakam.store")
 
 # Bumped when the on-disk layout changes. Tracked in `PRAGMA user_version` so an
 # upgrade runs exactly once per database. v0.1 files report 0.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+PROTOCOL_VERSION = "0.3"
+
+GENERATION_STATUSES = ("staged", "promoted", "rejected")
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
@@ -76,6 +80,60 @@ CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_validity ON memories(namespace, valid_to);
 CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(namespace, archived);
+"""
+
+# v0.3. Continuity state lives alongside the memories rather than in a second
+# database: an agent's identity, its generations, and the transitions between them
+# have to survive or fail together with the memories they describe.
+#
+# No foreign keys, matching the rest of the schema — `/restore` inserts children
+# before their parents exist and repairs the references in a second pass, exactly
+# as it already does for memory correction chains.
+GENERATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS generations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    parent_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'staged',
+    created_at TEXT NOT NULL,
+    promoted_at TEXT,
+    label TEXT NOT NULL DEFAULT '',
+    manifest TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    from_generation INTEGER,
+    to_generation INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    memory_records INTEGER,
+    corpus_digest_before TEXT,
+    corpus_digest_after TEXT,
+    checks TEXT NOT NULL DEFAULT '{}',
+    note TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS generation_artifacts (
+    generation_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    algorithm TEXT NOT NULL DEFAULT 'sha256',
+    digest TEXT NOT NULL,
+    bytes INTEGER,
+    records INTEGER,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (generation_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_generations_parent ON generations(parent_id);
+CREATE INDEX IF NOT EXISTS idx_migrations_target ON migrations(to_generation, id DESC);
 """
 
 FTS_SCHEMA = """
@@ -202,10 +260,17 @@ class Store:
                 for statement in _statements(BASE_SCHEMA):
                     self.db.execute(statement)
                 self._add_missing_columns()
-                for statement in _statements(INDEXES) + _statements(FTS_SCHEMA):
+                for statement in (
+                    _statements(INDEXES) + _statements(FTS_SCHEMA) + _statements(GENERATION_SCHEMA)
+                ):
                     self.db.execute(statement)
-                if version < SCHEMA_VERSION:
+                # Gated on 3, not on SCHEMA_VERSION: the index is only missing in
+                # files written before v0.2, and rebuilding it on every future
+                # schema bump would cost every user a full reindex for nothing.
+                if version < 3:
                     self._backfill_full_text_index()
+                self._ensure_agent_id()
+                if version < SCHEMA_VERSION:
                     self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 self.db.execute("COMMIT")
             except BaseException:
@@ -237,6 +302,22 @@ class Store:
         if stored:
             log.info("Building full-text index for %d existing memories", stored)
         self.db.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+
+    def _ensure_agent_id(self) -> None:
+        """Give the agent a permanent identity the first time this file is opened.
+
+        A v0.2 database gains one on upgrade, which is the honest outcome: that
+        agent always had a continuous identity, there was simply no name for it.
+        `INSERT OR IGNORE` is what makes it mint-once — reopening the file, or two
+        processes racing the same migration, cannot produce a second identity.
+        """
+        self.db.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('agent_id', ?)",
+            (lineage.new_agent_id(),),
+        )
+        self.db.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('agent_created_at', ?)", (_now(),)
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -556,7 +637,7 @@ class Store:
             "archived": archived,
             "consolidations": consolidations,
             "namespace": namespace,
-            "version": "0.2",
+            "version": PROTOCOL_VERSION,
         }
 
     @_synchronized
@@ -678,17 +759,657 @@ class Store:
         self.db.commit()
         return {"status": "pruned", "archived": len(doomed), "kept": keep}
 
+    # ---- generational continuity ---------------------------------------
+    #
+    # A generation records the runtime an agent ran as; the agent_id records who
+    # the agent is. Changing every field of the former must not disturb the
+    # latter — that separation is the whole of v0.3.
+
+    def _meta(self, key: str, default=None):
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def _set_meta(self, key: str, value) -> None:
+        self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, str(value)))
+
+    @staticmethod
+    def _as_generation_id(value) -> int:
+        # bool is an int in Python; True would silently become generation 1.
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError("generation id must be an integer")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError("generation id must be an integer") from None
+
+    @staticmethod
+    def _row_to_generation(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "agent_id": row["agent_id"],
+            "parent_id": row["parent_id"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "promoted_at": row["promoted_at"],
+            "label": row["label"],
+            "manifest": json.loads(row["manifest"]),
+        }
+
+    @_synchronized
+    def agent_id(self) -> str:
+        return self._meta("agent_id")
+
+    @_synchronized
+    def agent(self) -> dict:
+        current = self.current_generation()
+        return {
+            "agent_id": self._meta("agent_id"),
+            "created_at": self._meta("agent_created_at"),
+            "current_generation": current["id"] if current else None,
+            "generations": self.db.execute("SELECT COUNT(*) AS c FROM generations").fetchone()["c"],
+            "version": PROTOCOL_VERSION,
+        }
+
+    # ---- the memory corpus as a verifiable whole ----
+
+    def _memory_count(self, namespace: str | None = None) -> int:
+        if namespace is None:
+            return self.db.execute("SELECT COUNT(*) AS c FROM memories").fetchone()["c"]
+        return self.db.execute(
+            "SELECT COUNT(*) AS c FROM memories WHERE namespace = ?", (namespace,)
+        ).fetchone()["c"]
+
+    def _corpus_digest(self, namespace: str | None = None) -> str:
+        sql, params = "SELECT * FROM memories", ()
+        if namespace is not None:
+            sql, params = sql + " WHERE namespace = ?", (namespace,)
+        return lineage.corpus_digest(dict(row) for row in self.db.execute(sql, params))
+
+    @_synchronized
+    def corpus_digest(self, namespace: str | None = None) -> str:
+        """One digest over the whole memory corpus. See lineage.corpus_digest."""
+        return self._corpus_digest(namespace)
+
+    # ---- reads ----
+
+    @_synchronized
+    def get_generation(self, generation_id) -> dict | None:
+        row = self.db.execute(
+            "SELECT * FROM generations WHERE id = ?", (self._as_generation_id(generation_id),)
+        ).fetchone()
+        return self._row_to_generation(row) if row else None
+
+    @_synchronized
+    def list_generations(self) -> list[dict]:
+        rows = self.db.execute("SELECT * FROM generations ORDER BY id").fetchall()
+        return [self._row_to_generation(r) for r in rows]
+
+    @_synchronized
+    def current_generation(self) -> dict | None:
+        pointer = self._meta("current_generation")
+        return self.get_generation(int(pointer)) if pointer else None
+
+    @_synchronized
+    def ancestry(self, generation_id) -> list[int]:
+        """Every ancestor of a generation, root first, excluding the generation itself.
+
+        Walks the parent pointer, which is also what makes branching free: two
+        candidates staged from one parent are simply two rows with the same
+        `parent_id`, and neither can corrupt the other's ancestry.
+        """
+        generation_id = self._as_generation_id(generation_id)
+        row = self.db.execute(
+            "SELECT parent_id FROM generations WHERE id = ?", (generation_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"no generation with id {generation_id}")
+        chain, seen, parent = [], {generation_id}, row["parent_id"]
+        while parent is not None and parent not in seen:
+            chain.append(parent)
+            seen.add(parent)
+            row = self.db.execute(
+                "SELECT parent_id FROM generations WHERE id = ?", (parent,)
+            ).fetchone()
+            parent = row["parent_id"] if row else None
+        chain.reverse()
+        return chain
+
+    @_synchronized
+    def migrations(self, limit: int = 50) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT * FROM migrations ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [{**dict(r), "checks": json.loads(r["checks"])} for r in rows]
+
+    @_synchronized
+    def artifacts(self, generation_id) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT * FROM generation_artifacts WHERE generation_id = ? ORDER BY name",
+            (self._as_generation_id(generation_id),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---- writes ----
+
+    @_synchronized
+    def create_generation(self, parent=None, label: str = "", manifest=None) -> dict:
+        """Record a new generation of this agent.
+
+        The root generation is promoted on creation: there is no prior state to
+        migrate from and nothing to validate against. Every later generation is
+        staged and becomes current only through `promote_generation`, so a new
+        runtime never inherits the agent's identity by merely existing.
+
+        A second parentless generation is refused. A lineage with two roots cannot
+        answer "what preceded this?", which is the question the record exists for.
+        """
+        manifest = lineage.validate_manifest(manifest)
+        if not isinstance(label, str):
+            raise ValueError("'label' must be a string")
+        label = label[:120]
+
+        current = self.current_generation()
+        if parent is not None:
+            parent = self._as_generation_id(parent)
+            if self.get_generation(parent) is None:
+                raise ValueError(f"no generation with id {parent}")
+        elif current is not None:
+            raise ValueError(
+                "this agent already has a lineage; name a parent so the new generation joins it"
+            )
+
+        agent, now, root = self._meta("agent_id"), _now(), parent is None
+        try:
+            cursor = self.db.execute(
+                "INSERT INTO generations (agent_id, parent_id, status, created_at, promoted_at, "
+                "label, manifest) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    agent,
+                    parent,
+                    "promoted" if root else "staged",
+                    now,
+                    now if root else None,
+                    label,
+                    json.dumps(manifest),
+                ),
+            )
+            generation_id = cursor.lastrowid
+            if root:
+                self._set_meta("current_generation", generation_id)
+            else:
+                # The transition opens now, recording the semantic state being
+                # inherited, so a later validation can tell whether it survived.
+                self.db.execute(
+                    "INSERT INTO migrations (agent_id, from_generation, to_generation, status, "
+                    "started_at, memory_records, corpus_digest_before) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (agent, parent, generation_id, "staged", now,
+                     self._memory_count(), self._corpus_digest()),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return self.get_generation(generation_id)
+
+    @_synchronized
+    def record_artifacts(self, generation_id, artifacts) -> dict:
+        """Record digests a caller computed. The server never reads the files itself.
+
+        Hashing on the server would mean accepting a path from a caller and
+        reading it, which is an arbitrary-file-read oracle wearing an integrity
+        feature's clothes. The CLI does the reading, locally, against files the
+        operator names.
+        """
+        generation_id = self._as_generation_id(generation_id)
+        if self.get_generation(generation_id) is None:
+            raise ValueError(f"no generation with id {generation_id}")
+        checked = lineage.validate_artifacts(artifacts)
+        now = _now()
+        try:
+            for artifact in checked:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO generation_artifacts (generation_id, name, algorithm, "
+                    "digest, bytes, records, recorded_at) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                    (generation_id, artifact["name"], artifact["algorithm"], artifact["digest"],
+                     artifact["bytes"], now),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return {"status": "recorded", "generation": generation_id, "artifacts": len(checked)}
+
+    @_synchronized
+    def seal_corpus(self, generation_id, namespace: str | None = None) -> dict:
+        """Fix the memory corpus this generation inherited, as one digest."""
+        generation_id = self._as_generation_id(generation_id)
+        if self.get_generation(generation_id) is None:
+            raise ValueError(f"no generation with id {generation_id}")
+        digest, records = self._corpus_digest(namespace), self._memory_count(namespace)
+        self.db.execute(
+            "INSERT OR REPLACE INTO generation_artifacts (generation_id, name, algorithm, digest, "
+            "bytes, records, recorded_at) VALUES (?, ?, 'sha256', ?, NULL, ?, ?)",
+            (generation_id, lineage.CORPUS_ARTIFACT, digest, records, _now()),
+        )
+        self.db.commit()
+        return {
+            "status": "sealed",
+            "generation": generation_id,
+            "digest": digest,
+            "records": records,
+        }
+
+    # ---- continuity validation ----
+
+    def _check_identity(self, generation: dict) -> dict:
+        expected = self._meta("agent_id")
+        if generation["agent_id"] == expected:
+            return {"status": "pass", "detail": f"agent_id {expected}"}
+        return {
+            "status": "fail",
+            "detail": f"generation declares {generation['agent_id']}, this store holds {expected}",
+        }
+
+    def _check_memory(self, recorded: dict) -> dict:
+        sealed = recorded.get(lineage.CORPUS_ARTIFACT)
+        if sealed is None:
+            return {"status": "skipped", "detail": "no memory corpus was sealed for this generation"}
+        live, records = self._corpus_digest(), self._memory_count()
+        if live == sealed["digest"]:
+            return {
+                "status": "pass",
+                "detail": f"{records} records match the sealed corpus digest",
+                "records": records,
+            }
+        return {
+            "status": "fail",
+            "detail": (
+                f"corpus digest no longer matches: {sealed['records']} records were sealed, "
+                f"{records} are present now"
+            ),
+            "records": records,
+        }
+
+    def _check_recall(self, probes) -> dict:
+        """Can this generation still reach the knowledge it inherited?
+
+        A digest proves the bytes arrived; a probe proves they are still findable.
+        Access counts are deliberately not recorded here — validating an agent
+        must not distort the retention signals that decide what it keeps.
+        """
+        if not probes:
+            return {"status": "skipped", "detail": "no recall probes supplied"}
+        if not isinstance(probes, list):
+            raise ValueError("'probes' must be an array")
+        missed = []
+        for index, probe in enumerate(probes):
+            if not isinstance(probe, dict) or not isinstance(probe.get("query"), str):
+                raise ValueError(f"probes[{index}] must be an object with a 'query'")
+            hits = self.search(
+                probe["query"],
+                limit=12,
+                namespace=probe.get("namespace") or "",
+                record_access=False,
+            )
+            expected = probe.get("expect_memory")
+            found = bool(hits) if expected is None else expected in [h["id"] for h in hits]
+            if not found:
+                missed.append(probe["query"])
+        if missed:
+            return {"status": "fail", "detail": "could not recall: " + "; ".join(missed[:5])}
+        return {"status": "pass", "detail": f"{len(probes)} recall probes resolved"}
+
+    def _check_soul(self, recorded: dict, supplied) -> dict:
+        if not supplied:
+            return {"status": "skipped", "detail": "no artifact digests were supplied to compare"}
+        checked = lineage.validate_artifacts(supplied)
+        mismatched = [a["name"] for a in checked
+                      if a["name"] in recorded and recorded[a["name"]]["digest"] != a["digest"]]
+        missing = [a["name"] for a in checked if a["name"] not in recorded]
+        if mismatched or missing:
+            detail = []
+            if mismatched:
+                detail.append("digest mismatch: " + ", ".join(sorted(mismatched)))
+            if missing:
+                detail.append("never sealed: " + ", ".join(sorted(missing)))
+            return {"status": "fail", "detail": "; ".join(detail)}
+        return {
+            "status": "pass",
+            "detail": f"{len(checked)} artifacts match their recorded digests",
+        }
+
+    def _check_context(self, generation: dict) -> dict:
+        """External references are recorded, never dereferenced.
+
+        jnaapakam does not call a workflow engine, a Git host, or an artifact
+        store to confirm anything, so reporting `pass` here would claim a
+        verification that never happened. The status says exactly what was done.
+        """
+        references = generation["manifest"].get("external_state") or []
+        if not references:
+            return {"status": "skipped", "detail": "no external state was declared"}
+        return {
+            "status": "recorded",
+            "detail": (
+                f"{len(references)} external references recorded; verifying them is the "
+                "responsibility of the systems that own them"
+            ),
+            "references": references,
+        }
+
+    @staticmethod
+    def _check_behavioral(behavioral) -> dict:
+        """Recorded, not run: what counts as behavioural drift is the operator's call."""
+        if behavioral is None:
+            return {"status": "skipped", "detail": "no behavioural evaluation supplied"}
+        if not isinstance(behavioral, dict):
+            raise ValueError("'behavioral' must be an object")
+        status = behavioral.get("status")
+        if status not in ("pass", "fail", "skipped"):
+            raise ValueError("behavioral.status must be one of: pass, fail, skipped")
+        return {"status": status, "detail": str(behavioral.get("detail") or "")[:1000]}
+
+    @_synchronized
+    def validate_continuity(self, generation_id, artifacts=None, probes=None, behavioral=None) -> dict:
+        """Check that a generation still holds the agent it claims to continue.
+
+        Every check reports its own status, and one that was not requested says
+        `skipped` rather than `pass` — a validation that silently passes because
+        nothing was checked is exactly the failure this is meant to prevent.
+        """
+        generation_id = self._as_generation_id(generation_id)
+        generation = self.get_generation(generation_id)
+        if generation is None:
+            raise ValueError(f"no generation with id {generation_id}")
+
+        recorded = {a["name"]: a for a in self.artifacts(generation_id)}
+        checks = {
+            "identity": self._check_identity(generation),
+            "memory": self._check_memory(recorded),
+            "recall": self._check_recall(probes),
+            "soul": self._check_soul(recorded, artifacts),
+            "context": self._check_context(generation),
+            "behavioral": self._check_behavioral(behavioral),
+        }
+        result = {
+            "generation": generation_id,
+            "agent_id": generation["agent_id"],
+            "checked_at": _now(),
+            "passed": all(check["status"] != "fail" for check in checks.values()),
+            "checks": checks,
+        }
+        self._record_validation(generation_id, result)
+        return result
+
+    def _record_validation(self, generation_id: int, result: dict) -> None:
+        """Attach the outcome to this generation's open transition, or open one."""
+        row = self.db.execute(
+            "SELECT id FROM migrations WHERE to_generation = ? ORDER BY id DESC LIMIT 1",
+            (generation_id,),
+        ).fetchone()
+        status = "validated" if result["passed"] else "failed"
+        checks, digest, records = json.dumps(result["checks"]), self._corpus_digest(), self._memory_count()
+        try:
+            if row is None:
+                self.db.execute(
+                    "INSERT INTO migrations (agent_id, from_generation, to_generation, status, "
+                    "started_at, completed_at, memory_records, corpus_digest_after, checks) "
+                    "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+                    (self._meta("agent_id"), generation_id, status, result["checked_at"],
+                     result["checked_at"], records, digest, checks),
+                )
+            else:
+                self.db.execute(
+                    "UPDATE migrations SET status = ?, completed_at = ?, corpus_digest_after = ?, "
+                    "memory_records = ?, checks = ? WHERE id = ?",
+                    (status, result["checked_at"], digest, records, checks, row["id"]),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
+    # ---- promotion, rejection, rollback ----
+
+    @_synchronized
+    def promote_generation(self, generation_id, force: bool = False) -> dict:
+        """Make a generation the current one.
+
+        Refused unless its most recent validation passed, so a candidate that
+        failed — or was never checked at all — cannot quietly become the agent.
+        `force` exists for the operator who has decided anyway, and is written
+        onto the migration record so the override is never invisible later.
+
+        The status change, the migration record, and the current-generation
+        pointer move in one transaction: a failure part-way through leaves the
+        agent on the generation it already had.
+        """
+        generation_id = self._as_generation_id(generation_id)
+        generation = self.get_generation(generation_id)
+        if generation is None:
+            raise ValueError(f"no generation with id {generation_id}")
+        if generation["status"] == "rejected":
+            raise ValueError(f"generation {generation_id} was rejected and cannot be promoted")
+
+        latest = self.db.execute(
+            "SELECT * FROM migrations WHERE to_generation = ? ORDER BY id DESC LIMIT 1",
+            (generation_id,),
+        ).fetchone()
+        validated = latest is not None and latest["status"] == "validated"
+        if not validated and not force:
+            reason = (
+                "its last continuity validation did not pass"
+                if latest is not None and latest["status"] == "failed"
+                else "its continuity has not been validated"
+            )
+            raise ValueError(f"refusing to promote generation {generation_id}: {reason}")
+
+        previous = self.current_generation()
+        now = _now()
+        note = "" if validated else "forced promotion without a passing validation"
+        try:
+            self.db.execute(
+                "UPDATE generations SET status = 'promoted', promoted_at = COALESCE(promoted_at, ?) "
+                "WHERE id = ?",
+                (now, generation_id),
+            )
+            if latest is None:
+                self.db.execute(
+                    "INSERT INTO migrations (agent_id, from_generation, to_generation, status, "
+                    "started_at, completed_at, memory_records, corpus_digest_after, note) "
+                    "VALUES (?, ?, ?, 'promoted', ?, ?, ?, ?, ?)",
+                    (generation["agent_id"], previous["id"] if previous else None, generation_id,
+                     now, now, self._memory_count(), self._corpus_digest(), note),
+                )
+            else:
+                self.db.execute(
+                    "UPDATE migrations SET status = 'promoted', completed_at = ?, note = ? "
+                    "WHERE id = ?",
+                    (now, note or latest["note"], latest["id"]),
+                )
+            self._set_meta("current_generation", generation_id)
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return {
+            "status": "promoted",
+            "generation": generation_id,
+            "previous_generation": previous["id"] if previous else None,
+            "forced": not validated,
+        }
+
+    @_synchronized
+    def reject_generation(self, generation_id, reason: str = "") -> dict:
+        """Close a candidate off without removing it from the lineage."""
+        generation_id = self._as_generation_id(generation_id)
+        generation = self.get_generation(generation_id)
+        if generation is None:
+            raise ValueError(f"no generation with id {generation_id}")
+        current = self.current_generation()
+        if current and current["id"] == generation_id:
+            raise ValueError(
+                "refusing to reject the current generation; roll back to another one first"
+            )
+
+        now, note = _now(), str(reason)[:500]
+        try:
+            self.db.execute(
+                "UPDATE generations SET status = 'rejected' WHERE id = ?", (generation_id,)
+            )
+            latest = self.db.execute(
+                "SELECT id FROM migrations WHERE to_generation = ? ORDER BY id DESC LIMIT 1",
+                (generation_id,),
+            ).fetchone()
+            if latest is None:
+                self.db.execute(
+                    "INSERT INTO migrations (agent_id, from_generation, to_generation, status, "
+                    "started_at, completed_at, note) VALUES (?, ?, ?, 'rejected', ?, ?, ?)",
+                    (generation["agent_id"], generation["parent_id"], generation_id, now, now, note),
+                )
+            else:
+                self.db.execute(
+                    "UPDATE migrations SET status = 'rejected', completed_at = ?, note = ? "
+                    "WHERE id = ?",
+                    (now, note, latest["id"]),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return {"status": "rejected", "generation": generation_id, "reason": note}
+
+    @_synchronized
+    def rollback_generation(self, generation_id) -> dict:
+        """Return to an earlier generation without erasing anything.
+
+        The generation being left keeps its `promoted` status and every memory
+        stays exactly where it is. Rolling back is a change of runtime, not a
+        retraction of what the agent learned while running it — so this appends a
+        `rolled_back` record rather than rewriting the log.
+        """
+        generation_id = self._as_generation_id(generation_id)
+        target = self.get_generation(generation_id)
+        if target is None:
+            raise ValueError(f"no generation with id {generation_id}")
+        if target["status"] != "promoted":
+            raise ValueError(
+                f"generation {generation_id} was never current; a rollback target must be a "
+                "generation that was promoted at some point"
+            )
+        current = self.current_generation()
+        if current and current["id"] == generation_id:
+            raise ValueError(f"generation {generation_id} is already current")
+
+        now = _now()
+        try:
+            self.db.execute(
+                "INSERT INTO migrations (agent_id, from_generation, to_generation, status, "
+                "started_at, completed_at, memory_records, corpus_digest_after, note) "
+                "VALUES (?, ?, ?, 'rolled_back', ?, ?, ?, ?, 'rollback')",
+                (target["agent_id"], current["id"] if current else None, generation_id, now, now,
+                 self._memory_count(), self._corpus_digest()),
+            )
+            self._set_meta("current_generation", generation_id)
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return {
+            "status": "rolled_back",
+            "generation": generation_id,
+            "from_generation": current["id"] if current else None,
+        }
+
+    # ---- comparison ----
+
+    @_synchronized
+    def diff_generations(self, before_id, after_id) -> dict:
+        """What changed between two generations, and what did not."""
+        before_id, after_id = self._as_generation_id(before_id), self._as_generation_id(after_id)
+        before, after = self.get_generation(before_id), self.get_generation(after_id)
+        for identifier, generation in ((before_id, before), (after_id, after)):
+            if generation is None:
+                raise ValueError(f"no generation with id {identifier}")
+
+        left = {a["name"]: a for a in self.artifacts(before_id)}
+        right = {a["name"]: a for a in self.artifacts(after_id)}
+        artifacts = {}
+        for name in sorted((left.keys() | right.keys()) - {lineage.CORPUS_ARTIFACT}):
+            if name not in left:
+                artifacts[name] = "added"
+            elif name not in right:
+                artifacts[name] = "removed"
+            else:
+                artifacts[name] = (
+                    "unchanged" if left[name]["digest"] == right[name]["digest"] else "changed"
+                )
+
+        sealed_before, sealed_after = left.get(lineage.CORPUS_ARTIFACT), right.get(lineage.CORPUS_ARTIFACT)
+        if sealed_before and sealed_after:
+            corpus = "unchanged" if sealed_before["digest"] == sealed_after["digest"] else "changed"
+        else:
+            corpus = "unknown"
+
+        difference = {
+            "from": before_id,
+            "to": after_id,
+            "agent_id": {
+                "stable": before["agent_id"] == after["agent_id"],
+                "value": after["agent_id"],
+            },
+            "sections": lineage.diff_manifests(before["manifest"], after["manifest"]),
+            "artifacts": artifacts,
+            "memory": {
+                "records": [
+                    sealed_before["records"] if sealed_before else None,
+                    sealed_after["records"] if sealed_after else None,
+                ],
+                "corpus": corpus,
+            },
+        }
+        external = lineage.diff_external_state(before["manifest"], after["manifest"])
+        if external:
+            difference["external_state"] = external
+        return difference
+
     # ---- backup --------------------------------------------------------
 
     @_synchronized
     def export_all(self) -> dict:
+        """Export memories and the continuity record that describes them.
+
+        Soul files stay out, exactly as in v0.2: they are plain files the user
+        versions themselves. Only their *digests* travel, inside `artifacts`, so a
+        restore can prove the soul that arrived is the soul that left without the
+        backup ever becoming a place secrets could hide.
+        """
         memories = [dict(r) for r in self.db.execute("SELECT * FROM memories ORDER BY id")]
         consolidations = [dict(r) for r in self.db.execute("SELECT * FROM consolidations ORDER BY id")]
+        current = self._meta("current_generation")
         return {
-            "version": "0.2",
+            "version": PROTOCOL_VERSION,
             "exported_at": _now(),
+            "agent_id": self._meta("agent_id"),
+            "agent_created_at": self._meta("agent_created_at"),
+            "current_generation": int(current) if current else None,
+            "corpus_digest": self._corpus_digest(),
             "memories": memories,
             "consolidations": consolidations,
+            "generations": [
+                self._row_to_generation(r)
+                for r in self.db.execute("SELECT * FROM generations ORDER BY id")
+            ],
+            "migrations": [
+                {**dict(r), "checks": json.loads(r["checks"])}
+                for r in self.db.execute("SELECT * FROM migrations ORDER BY id")
+            ],
+            "artifacts": [
+                dict(r)
+                for r in self.db.execute(
+                    "SELECT * FROM generation_artifacts ORDER BY generation_id, name"
+                )
+            ],
         }
 
     @_synchronized
@@ -707,6 +1428,10 @@ class Store:
         * **Reference-repairing.** Where an id must change (a merge into a populated
           store), references are remapped through the same mapping, and references
           that resolve to nothing are dropped rather than left dangling.
+
+        v0.3 adds the continuity record — identity, generations, migrations and
+        artifact digests — through the same transaction and the same remapping. A
+        v0.2 payload simply carries none of those keys and restores as it always did.
         """
         if not isinstance(data, dict):
             raise ValueError("backup must be a JSON object")
@@ -714,6 +1439,8 @@ class Store:
         consolidations = data.get("consolidations", [])
         if not isinstance(memories, list) or not isinstance(consolidations, list):
             raise ValueError("'memories' and 'consolidations' must be arrays")
+
+        adopt, prepared_lineage = self._prepare_lineage(data)
 
         def as_json_text(value, default, field, index):
             """Normalise a JSON column, rejecting anything unparseable."""
@@ -855,6 +1582,7 @@ class Store:
                         consolidation["created_at"],
                     ),
                 )
+            generations_imported = self._import_lineage(data, adopt, prepared_lineage)
             self.db.commit()
         except BaseException:
             self.db.rollback()
@@ -864,4 +1592,174 @@ class Store:
             "status": "restored",
             "memories_imported": len(prepared),
             "consolidations_imported": len(prepared_consolidations),
+            "generations_imported": generations_imported,
+            "agent_id": self._meta("agent_id"),
         }
+
+    def _prepare_lineage(self, data: dict) -> tuple[str | None, dict]:
+        """Validate the continuity half of a backup before a single row is written.
+
+        Returns the agent identity to adopt, if any, and the checked payload.
+
+        The identity rule: a store with no lineage of its own adopts the backup's
+        agent_id — that is the migration case, a fresh machine inheriting an
+        existing agent, and it has to be frictionless. A store that already has a
+        lineage refuses a different agent outright, because merging two agents'
+        continuity records produces one that describes neither.
+        """
+        generations = data.get("generations", [])
+        migrations = data.get("migrations", [])
+        artifacts = data.get("artifacts", [])
+        for name, value in (
+            ("generations", generations), ("migrations", migrations), ("artifacts", artifacts)
+        ):
+            if not isinstance(value, list):
+                raise ValueError(f"'{name}' must be an array")
+
+        adopt = None
+        incoming = data.get("agent_id")
+        if incoming is not None:
+            if not lineage.is_agent_id(incoming):
+                raise ValueError("'agent_id' is not a jnaapakam agent identifier")
+            if incoming != self._meta("agent_id"):
+                if self.db.execute("SELECT COUNT(*) AS c FROM generations").fetchone()["c"]:
+                    raise ValueError(
+                        "refusing to restore another agent's continuity state into a store that "
+                        "already has a lineage of its own"
+                    )
+                adopt = incoming
+
+        prepared_generations = []
+        for index, generation in enumerate(generations):
+            if not isinstance(generation, dict):
+                raise ValueError(f"generations[{index}] must be an object")
+            status = generation.get("status") or "staged"
+            if status not in GENERATION_STATUSES:
+                raise ValueError(f"generations[{index}].status is not a known generation status")
+            if not generation.get("created_at"):
+                raise ValueError(f"generations[{index}] is missing 'created_at'")
+            manifest = generation.get("manifest")
+            if isinstance(manifest, str):
+                try:
+                    manifest = json.loads(manifest)
+                except (TypeError, ValueError):
+                    raise ValueError(f"generations[{index}].manifest is not valid JSON") from None
+            # Restored manifests are as untrusted as freshly submitted ones.
+            prepared_generations.append(
+                {"row": generation, "status": status,
+                 "manifest": lineage.validate_manifest(manifest or {})}
+            )
+
+        for index, migration in enumerate(migrations):
+            if not isinstance(migration, dict):
+                raise ValueError(f"migrations[{index}] must be an object")
+            if not migration.get("started_at"):
+                raise ValueError(f"migrations[{index}] is missing 'started_at'")
+
+        for index, artifact in enumerate(artifacts):
+            if not isinstance(artifact, dict):
+                raise ValueError(f"artifacts[{index}] must be an object")
+            if not lineage.is_artifact_name(artifact.get("name")):
+                raise ValueError(f"artifacts[{index}].name must be a plain label, not a path")
+            if not lineage.is_digest(artifact.get("digest")):
+                raise ValueError(f"artifacts[{index}].digest must be a lowercase hex sha256")
+
+        return adopt, {
+            "generations": prepared_generations,
+            "migrations": migrations,
+            "artifacts": artifacts,
+        }
+
+    def _import_lineage(self, data: dict, adopt: str | None, prepared: dict) -> int:
+        """Write the continuity record, inside the caller's open transaction."""
+        if adopt:
+            self._set_meta("agent_id", adopt)
+            if data.get("agent_created_at"):
+                self._set_meta("agent_created_at", data["agent_created_at"])
+        agent = self._meta("agent_id")
+
+        # A generation already present with the same id and creation time is the
+        # same generation: re-importing this agent's own backup must not fork its
+        # lineage into two copies of itself.
+        existing = {
+            row["id"]: row["created_at"]
+            for row in self.db.execute("SELECT id, created_at FROM generations")
+        }
+        generation_map: dict[int, int] = {}
+        imported = 0
+        for item in prepared["generations"]:
+            generation = item["row"]
+            old_id = generation.get("id")
+            if isinstance(old_id, int) and existing.get(old_id) == generation.get("created_at"):
+                generation_map[old_id] = old_id
+                continue
+            keep = isinstance(old_id, int) and old_id > 0 and old_id not in existing
+            cursor = self.db.execute(
+                "INSERT INTO generations (id, agent_id, parent_id, status, created_at, "
+                "promoted_at, label, manifest) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)",
+                (old_id if keep else None, agent, item["status"], generation["created_at"],
+                 generation.get("promoted_at"), str(generation.get("label") or "")[:120],
+                 json.dumps(item["manifest"])),
+            )
+            new_id = cursor.lastrowid
+            existing[new_id] = generation["created_at"]
+            imported += 1
+            if isinstance(old_id, int):
+                generation_map[old_id] = new_id
+
+        # Second pass, as for memories: parents may have been renumbered, and a
+        # parent that no longer resolves becomes a root rather than a dangling id.
+        for item in prepared["generations"]:
+            old_id = item["row"].get("id")
+            new_id = generation_map.get(old_id) if isinstance(old_id, int) else None
+            if new_id is None:
+                continue
+            parent = item["row"].get("parent_id")
+            self.db.execute(
+                "UPDATE generations SET parent_id = ? WHERE id = ?",
+                (generation_map.get(parent) if isinstance(parent, int) else None, new_id),
+            )
+
+        for artifact in prepared["artifacts"]:
+            target = generation_map.get(artifact.get("generation_id"))
+            if target is None:
+                continue
+            self.db.execute(
+                "INSERT OR REPLACE INTO generation_artifacts (generation_id, name, algorithm, "
+                "digest, bytes, records, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (target, artifact["name"], artifact.get("algorithm") or "sha256",
+                 artifact["digest"], artifact.get("bytes"), artifact.get("records"),
+                 artifact.get("recorded_at") or _now()),
+            )
+
+        seen_migrations = {
+            (row["id"], row["started_at"])
+            for row in self.db.execute("SELECT id, started_at FROM migrations")
+        }
+        for migration in prepared["migrations"]:
+            if (migration.get("id"), migration.get("started_at")) in seen_migrations:
+                continue
+            target = generation_map.get(migration.get("to_generation"))
+            if target is None:
+                continue
+            checks = migration.get("checks")
+            self.db.execute(
+                "INSERT INTO migrations (agent_id, from_generation, to_generation, status, "
+                "started_at, completed_at, memory_records, corpus_digest_before, "
+                "corpus_digest_after, checks, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (agent, generation_map.get(migration.get("from_generation")), target,
+                 str(migration.get("status") or "staged"), migration["started_at"],
+                 migration.get("completed_at"), migration.get("memory_records"),
+                 migration.get("corpus_digest_before"), migration.get("corpus_digest_after"),
+                 checks if isinstance(checks, str) else json.dumps(checks or {}),
+                 str(migration.get("note") or "")[:500]),
+            )
+
+        # Only adopted when this store has no current generation of its own:
+        # restoring a backup must not silently move a running agent's pointer.
+        incoming_current = data.get("current_generation")
+        if self._meta("current_generation") is None and isinstance(incoming_current, int):
+            mapped = generation_map.get(incoming_current)
+            if mapped is not None:
+                self._set_meta("current_generation", mapped)
+        return imported
