@@ -1,5 +1,9 @@
 # jñāpakaṁ
 
+[![PyPI](https://img.shields.io/pypi/v/jnaapakam)](https://pypi.org/project/jnaapakam/)
+[![Python versions](https://img.shields.io/pypi/pyversions/jnaapakam)](https://pypi.org/project/jnaapakam/)
+[![CI](https://github.com/yablokolabs/jnaapakam/actions/workflows/ci.yml/badge.svg)](https://github.com/yablokolabs/jnaapakam/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/pypi/l/jnaapakam)](LICENSE)
 [![MCPize](https://mcpize.com/badge/@yablokolabs/jnaapakam)](https://mcpize.com/mcp/jnaapakam)
 
 **An open protocol for AI agent memory persistence.**
@@ -35,18 +39,16 @@ Some frameworks bolt on vector databases or conversation logs, but there's no st
 
 ### 1. Install
 
-From source (works today):
+```bash
+pip install jnaapakam
+```
+
+Or from source:
 
 ```bash
 git clone https://github.com/yablokolabs/jnaapakam.git
 cd jnaapakam
 pip install .
-```
-
-Once v0.2 is published to PyPI:
-
-```bash
-pip install jnaapakam
 ```
 
 The only runtime dependency is `aiohttp`. Full-text search uses SQLite's built-in FTS5, so there is no extension to compile, no daemon to run, and no network call on first start.
