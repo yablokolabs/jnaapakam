@@ -51,7 +51,7 @@ Answer the question based ONLY on the provided memories. Reference memory IDs li
 If no relevant memories exist, say so honestly. Be thorough but concise."""
 
 MCP_PROTOCOL_VERSION = "2025-03-26"
-MCP_SERVER_INFO = {"name": "jnaapakam", "version": "0.3.0"}
+MCP_SERVER_INFO = {"name": "jnaapakam", "version": "0.4.0"}
 
 NAMESPACE_PARAM = {
     "type": "string",
@@ -343,7 +343,7 @@ def build_app(config: Config, chat) -> web.Application:
         return web.json_response(
             {
                 "name": "jnaapakam",
-                "version": "0.3.0",
+                "version": "0.4.0",
                 "transport": "streamable-http",
                 "mcp_endpoint": "/mcp",
                 "tools": [tool["name"] for tool in MCP_TOOLS],
@@ -352,7 +352,7 @@ def build_app(config: Config, chat) -> web.Application:
 
     async def handle_health(request):
         """Liveness for platform startup probes: reachable without credentials."""
-        return web.json_response({"status": "ok", "name": "jnaapakam", "version": "0.3.0"})
+        return web.json_response({"status": "ok", "name": "jnaapakam", "version": "0.4.0"})
 
     async def handle_status(request):
         namespace = request.query.get("namespace")

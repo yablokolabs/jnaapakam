@@ -145,13 +145,14 @@ jnaapakam generation validate 2 --db ~/agent/memory.db --soul-dir ~/agent/soul \
 ```
 
 ```
-  identity     pass     agent_id urn:jnaapakam:agent:9d689f1832ff4829b6a4899fb622cfe4
-  memory       pass     3 records match the sealed corpus digest
-  recall       pass     2 recall probes resolved
-  soul         pass     3 artifacts match their recorded digests
-  context      recorded 1 external references recorded; verifying them is the
-                        responsibility of the systems that own them
-  behavioral   skipped  no behavioural evaluation supplied
+  identity       pass     agent_id urn:jnaapakam:agent:9d689f1832ff4829b6a4899fb622cfe4
+  memory         pass     3 records match the sealed corpus digest
+  semantic_state pass     validity, archival, corrections and links match the sealed state
+  recall         pass     2 recall probes resolved
+  soul           pass     3 artifacts match their recorded digests
+  context        recorded 1 external references recorded; verifying them is the
+                          responsibility of the systems that own them
+  behavioral     skipped  no behavioural evaluation supplied
 generation 2: continuity verified
 ```
 
@@ -161,7 +162,8 @@ That covers the eight things worth verifying:
 |---|----------|-----|
 | 1 | Stable `agent_id` | `identity` — the generation carries the same URN the store holds |
 | 2 | Soul integrity | `soul` — SHA-256 over the exact bytes of each soul file |
-| 3 | Memory count and integrity | `memory` — the corpus digest is byte-identical across machines |
+| 3 | Memory count and integrity | `memory` — the corpus content digest is byte-identical across machines |
+| 3b | Corrections still applied | `semantic_state` — supersession, archival and links survived the move |
 | 4 | Historical decisions retrievable | `recall` — the PostgreSQL decision still comes back from search |
 | 5 | Project context | `recall` — the eu-west deploy constraint still resolves |
 | 6 | Lineage | `generation show 2` reports `ancestry: [1]` |
@@ -226,7 +228,7 @@ SOUL.md:        unchanged
 Tampering is detected, not tolerated. Edit a soul file after sealing:
 
 ```
-  soul         fail     digest mismatch: SOUL.md
+  soul           fail     digest mismatch: SOUL.md
 generation 2: validation FAILED
 ```
 

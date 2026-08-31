@@ -331,11 +331,9 @@ def _generation_validate(args) -> int:
     found = _soul_digests(Path(args.soul_dir)) if args.soul_dir else {}
 
     def action(store):
-        recorded = {
-            artifact["name"]
-            for artifact in store.artifacts(args.id)
-            if artifact["name"] != lineage.CORPUS_ARTIFACT
-        }
+        # Only soul files live on disk. The corpus and state digests are computed
+        # from the database, so they are never expected as files.
+        recorded = {artifact["name"] for artifact in store.artifacts(args.id)} & set(SOUL_FILES)
         # Sealed but no longer on disk: reported here rather than quietly dropped,
         # because a missing soul file is exactly the kind of loss this catches.
         missing = sorted(recorded - set(found))
@@ -345,9 +343,9 @@ def _generation_validate(args) -> int:
             probes=[{"query": q} for q in args.probe] or None,
         )
         for name, check in result["checks"].items():
-            print(f"  {name:<12} {check['status']:<8} {check['detail']}")
+            print(f"  {name:<15}{check['status']:<9}{check['detail']}")
         if missing:
-            print(f"  {'artifacts':<12} {'fail':<8} sealed but missing from disk: {', '.join(missing)}")
+            print(f"  {'artifacts':<15}{'fail':<9}sealed but missing from disk: {', '.join(missing)}")
         passed = result["passed"] and not missing
         print(f"generation {args.id}: {'continuity verified' if passed else 'validation FAILED'}")
         return 0 if passed else 1
@@ -399,7 +397,9 @@ def _generation_diff(args) -> int:
                 print(f"  - {field}: {value}")
             print()
         records = difference["memory"]["records"]
-        print(f"memory:    {records[0]} -> {records[1]} records ({difference['memory']['corpus']})")
+        memory = difference["memory"]
+        print(f"memory:         {records[0]} -> {records[1]} records (content {memory['corpus']})")
+        print(f"semantic state: {memory['state']}")
         for name, state in difference["artifacts"].items():
             print(f"{name + ':':<16}{state}")
         return 0

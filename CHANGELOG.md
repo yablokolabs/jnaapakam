@@ -3,6 +3,53 @@
 All notable changes to jñāpakaṁ are recorded here. The protocol specification is
 [PROTOCOL.md](PROTOCOL.md); this file tracks the reference implementation.
 
+## [0.4.0] — 2026-08-31
+
+**Content is not continuity.** v0.3 verified that an agent's memories survived a
+migration. It did not verify that the agent still *read* them the same way.
+
+A migration could carry every memory across intact and still drop the correction
+chain: *"the preferred database is PostgreSQL"*, superseded by *"the user switched
+to ClickHouse"*, arrives as two live and contradictory memories. Every byte of text
+is present, the v0.3 corpus digest is byte-identical, and the agent is wrong.
+
+### Added
+
+- **Semantic state digest** — covers each memory's validity interval, archival
+  flag, correction chain and consolidation links, alongside the existing content
+  digest. Sealing records both; `/backup` carries both.
+- **`semantic_state`** — a seventh continuity check, reported separately from
+  `memory`. The two mean different things: `memory` says knowledge was lost or
+  altered, `semantic_state` says it all arrived and is now interpreted
+  differently. Collapsing them would tell an operator something is wrong without
+  saying what.
+- `Store.corpus_digests()` returning both digests; `corpus_state_digest` in the
+  backup payload; a `memory_state` artifact recorded at seal time.
+
+### Changed — breaking, and why it is a minor bump
+
+- **The content digest now covers `entities` and `topics`.** They are indexed, so
+  corrupting them changes what the agent can recall even when `raw_text` is
+  untouched. Their omission in v0.3 was an oversight, not a tradeoff — it was never
+  documented as deliberate.
+- **Cross-row references are hashed by the target's content digest**, not its row
+  id. `17 → 26` and `3 → 91` agree after a restore renumbers everything, while
+  `17 → nothing` does not.
+- The digest rules in PROTOCOL.md §10.6 are normative, so a v0.3 and a v0.4
+  implementation compute different digests for the same corpus. A generation
+  sealed under v0.3 will not verify under v0.4. That is an interoperability break,
+  and shipping it as a patch would leave two implementations silently disagreeing
+  about whether an agent's continuity held.
+
+### Compatibility
+
+- A v0.3 generation carries no `memory_state` artifact, so that check reports
+  `skipped` rather than failing.
+- Databases, backups and every endpoint are otherwise unchanged. v0.2 backups
+  still restore; v0.2 databases still upgrade in place.
+- **Re-seal generations created under v0.3** (`jnaapakam generation seal <id>`) so
+  their digests are recomputed under the v0.4 rules.
+
 ## [0.3.0] — 2026-08-31
 
 **Generational continuity.** An agent's model, runtime, tools, hardware and
