@@ -577,18 +577,19 @@ jnaapakam generation validate 2 --soul-dir ./soul
 jnaapakam generation promote 2
 ```
 
-`validate` runs six checks, and one that was not requested reports `skipped`
+`validate` runs seven checks, and one that was not requested reports `skipped`
 rather than `pass` — a validation that passes because nothing was checked is
 exactly the failure this exists to prevent:
 
 ```
-  identity     pass     agent_id urn:jnaapakam:agent:9f2c1e7a…
-  memory       pass     1842 records match the sealed corpus digest
-  recall       pass     3 recall probes resolved
-  soul         pass     3 artifacts match their recorded digests
-  context      recorded 1 external references recorded; verifying them is the
-                        responsibility of the systems that own them
-  behavioral   skipped  no behavioural evaluation supplied
+  identity       pass     agent_id urn:jnaapakam:agent:9f2c1e7a…
+  memory         pass     1842 records match the sealed corpus digest
+  semantic_state pass     validity, archival, corrections and links match the sealed state
+  recall         pass     3 recall probes resolved
+  soul           pass     3 artifacts match their recorded digests
+  context        recorded 1 external references recorded; verifying them is the
+                          responsibility of the systems that own them
+  behavioral     skipped  no behavioural evaluation supplied
 generation 2: continuity verified
 ```
 
@@ -631,12 +632,37 @@ curl http://localhost:8889/migrations      # the whole history, still intact
 `/clear` does not erase the lineage or the identity either. Deleting memories is
 not the same as claiming the agent never existed.
 
+### Content is not continuity
+
+A migration can carry every memory across intact and still lose the agent. Say
+generation 1 learned *"the preferred database is PostgreSQL"*, then later
+*"the user switched to ClickHouse"*, and superseded the first with the second. If
+the correction chain is dropped on the way over, both memories arrive, both are
+live, and the agent now believes two contradictory things — while a digest over
+memory *text* stays byte-identical, because no text changed.
+
+So the corpus gets two digests:
+
+| Digest | Question | Covers |
+|---|---|---|
+| `content` | What knowledge exists? | text, summary, source, namespace, kind, importance, event time, entities, topics |
+| `semantic_state` | How is it read? | content digest + validity interval, archival, correction chain, consolidation links |
+
+They fail separately, because they mean different things and demand different
+responses: a content failure means memories were lost or altered; a state failure
+means they all arrived and are now interpreted differently.
+
+Cross-row references — supersession and consolidation links — are hashed as **the
+content digest of what they point at**, never as a row id. So `17 → 26` becoming
+`3 → 91` after a restore renumbers everything still matches, while `17 → nothing`
+fails.
+
 ### Integrity, not authenticity
 
 Digests are SHA-256 over the exact bytes on disk — no newline translation, no BOM
-stripping, no normalisation. The memory corpus gets one order-independent digest so
-it survives a restore that renumbers every row, while a recall (which bumps access
-counters) leaves it unchanged.
+stripping, no normalisation. Both corpus digests are order-independent so they
+survive a restore that renumbers every row, while a recall (which bumps access
+counters) leaves them unchanged.
 
 > [!IMPORTANT]
 > A digest proves the bytes did not change. It says nothing about *who* produced

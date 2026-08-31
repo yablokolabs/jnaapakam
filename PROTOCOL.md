@@ -1,4 +1,4 @@
-# jñāpakaṁ Protocol Specification v0.3
+# jñāpakaṁ Protocol Specification v0.4
 
 ## Overview
 
@@ -7,6 +7,30 @@ The jñāpakaṁ protocol defines a standard for AI agent memory persistence. It
 1. **Soul Schema** — Static identity files that define who an agent is
 2. **Memory API** — HTTP endpoints for dynamic memory operations
 3. **Continuity Record** — The agent's permanent identity, its generations, and the migrations between them (§10)
+
+### What changed in v0.4
+
+v0.3 verified that an agent's *memories* survived a migration. It did not verify
+that the agent still **read** them the same way, which is a different and equally
+load-bearing property.
+
+| Change | Compatibility |
+|--------|---------------|
+| **Semantic state digest** — validity, archival, correction chains and consolidation links are now hashed (§10.6) | Additive check; **breaking** digest definition |
+| Content digest now covers `entities` and `topics`, which are indexed and decide what is retrievable | **Breaking** digest definition |
+| Cross-row references are hashed by the target's content digest rather than its row id, so they survive renumbering while a lost link is still detected | **Breaking** digest definition |
+| `semantic_state` added as a seventh continuity check (§10.5) | Additive |
+| `/backup` gains `corpus_state_digest`; sealing records a `memory_state` artifact | Additive |
+
+**Why this is a version bump and not a patch.** The digest rules in §10.6 are
+normative. A v0.3 implementation and a v0.4 implementation compute different
+digests for the same corpus, so a generation sealed under v0.3 will not verify
+under v0.4. That is an interoperability break, and hiding it behind a patch
+release would leave two implementations silently disagreeing about whether an
+agent's continuity held.
+
+A v0.3 generation carries no `memory_state` artifact, so that check reports
+`skipped` rather than failing. Everything outside §10.6 is unchanged.
 
 ### What changed in v0.3
 
@@ -139,7 +163,7 @@ Periodic tasks the agent should check on.
 - **Content-Type:** `application/json`
 - **Default Port:** 8889
 - **Default Bind:** `127.0.0.1`
-- **Base Path:** `/` (no versioned prefix in v0.3)
+- **Base Path:** `/` (no versioned prefix in v0.4)
 
 ### Authentication
 
@@ -180,7 +204,7 @@ Returns memory statistics.
   "total_memories": 42,
   "unconsolidated": 5,
   "consolidations": 8,
-  "version": "0.3"
+  "version": "0.4"
 }
 ```
 
@@ -383,11 +407,12 @@ Export memories, consolidations, and the continuity record as JSON.
 
 ```json
 {
-  "version": "0.3",
+  "version": "0.4",
   "exported_at": "2026-03-08T12:00:00Z",
   "agent_id": "urn:jnaapakam:agent:...",
   "current_generation": 2,
   "corpus_digest": "sha256 hex",
+  "corpus_state_digest": "sha256 hex",
   "memories": [ ... ],
   "consolidations": [ ... ],
   "generations": [ ... ],
@@ -882,7 +907,8 @@ for external state — `recorded`.
 | Check | Question |
 |-------|----------|
 | `identity` | Does this generation carry the same stable `agent_id` as the store? |
-| `memory` | Does the live corpus still match the digest sealed for this generation? |
+| `memory` | Does the live corpus still match the **content** digest sealed for this generation? |
+| `semantic_state` | Is that knowledge still read the same way — validity, archival, corrections, links? |
 | `recall` | Can the memories the operator probed for still be retrieved? |
 | `soul` | Do the supplied artifact digests match the recorded ones? |
 | `context` | What external references were declared? |
@@ -899,6 +925,11 @@ for external state — `recorded`.
   behalf of the operator, not recalls by the agent, and counting them would distort
   the retention signals of §8.
 - The overall result fails if any check fails.
+- `memory` and `semantic_state` MUST be reported separately. They mean different
+  things: the first says memories were lost or altered, the second says they all
+  arrived and are now interpreted differently. Collapsing them tells an operator
+  that something is wrong without saying what, and the two demand different
+  responses.
 
 `behavioral` is recorded, not run. What counts as behavioural drift is a judgement
 about a particular agent, and a protocol that guessed at it would be wrong loudly.
@@ -915,17 +946,50 @@ simulated by anything in this section.
 - **File artifacts.** SHA-256 over the exact bytes on disk, lowercase hex. No
   newline translation, no BOM stripping, no whitespace trimming, no normalisation
   of any kind. What is hashed is what is stored.
-- **The memory corpus.** A per-memory digest over a canonical JSON object
-  containing exactly `namespace`, `source`, `kind`, `summary`, `raw_text`,
-  `created_at`, `event_time`, and `importance`; serialised with sorted keys, no
-  insignificant whitespace, UTF-8, and `importance` formatted to six decimal places
-  so the digest is reproducible outside any one language. The corpus digest is
-  SHA-256 over the newline-joined **sorted** list of those digests.
+- **The memory corpus.** Two digests, because content and interpretation fail for
+  different reasons and demand different responses.
 
-The corpus digest is order-independent and excludes `id`, `access_count`,
-`last_accessed`, `consolidated`, `superseded_by`, `valid_to` and `archived`. This
-is what lets it survive a migration: a restore may renumber every row, and a recall
-must not make the corpus look changed when nothing was learned or forgotten.
+Canonical JSON throughout means sorted keys, no insignificant whitespace, UTF-8,
+`importance` formatted to six decimal places, and string arrays sorted — so a
+digest is reproducible outside any one language.
+
+**Content digest — what knowledge exists.** A per-memory digest over a canonical
+JSON object containing exactly `namespace`, `source`, `kind`, `summary`,
+`raw_text`, `created_at`, `event_time`, `importance`, `entities` and `topics`. The
+corpus content digest is SHA-256 over the newline-joined **sorted** list of those
+per-memory digests, keeping duplicates.
+
+`entities` and `topics` are included because they are indexed and therefore decide
+what is findable: corrupting them changes what the agent can recall even when
+`raw_text` is untouched.
+
+**Semantic state digest — how that knowledge is read.** A per-memory digest over a
+canonical JSON object containing that memory's content digest plus `valid_from`,
+`valid_to`, `archived`, `superseded_by`, and `connections`. The corpus state digest
+is SHA-256 over the newline-joined **sorted** list of those.
+
+Cross-row references — `superseded_by` and each `connections[].linked_to` — MUST be
+hashed as **the content digest of the memory they point at**, never as a row id, and
+MUST hash to a distinct reserved value when they resolve to nothing.
+
+> **Why two digests, and why links are hashed by target content.** A migration can
+> carry every memory across intact and still drop the correction chain. "The
+> preferred database is PostgreSQL", superseded by "the user switched to
+> ClickHouse", becomes two live and contradictory memories — while a content-only
+> digest stays byte-identical, because no text changed. Content continuity is not
+> semantic continuity. Hashing links by target content rather than by row id is
+> what lets `17 → 26` and `3 → 91` agree after a restore renumbers everything,
+> while `17 → nothing` still fails.
+
+Both digests are order-independent and exclude `id`, `access_count`,
+`last_accessed`, and `consolidated`. That is what lets them survive a migration: a
+restore may renumber every row, and a recall must not make the corpus look changed
+when nothing was learned or forgotten.
+
+Two memories whose content is byte-identical necessarily share a content digest, so
+a link to either hashes the same. This is a deliberate limit: if two memories say
+exactly the same thing, pointing at one rather than the other is not a semantic
+difference.
 
 **Rules:**
 
@@ -1030,4 +1094,5 @@ manifest, an external database:
 |---------|------|---------|
 | 0.1 | 2026-03-08 | Initial protocol specification |
 | 0.2 | 2026-08-05 | Retrieval as a protocol operation (`/search`, ranking requirements); enforceable namespaces (§6); memory correction by supersession (§7); gated contradiction detection and soft forgetting (§8); bearer authentication and safe bind defaults; error semantics; corrected default port and `/backup` payload |
+| 0.4 | 2026-08-31 | Continuity integrity split into a content digest and a semantic state digest (§10.6): validity intervals, archival, correction chains and consolidation links are now verified, with cross-row references hashed by target content so they survive renumbering; `semantic_state` added as a seventh continuity check |
 | 0.3 | 2026-08-31 | Generational continuity (§10): permanent `agent_id`, generations with branch-capable lineage, migration records, six-check continuity validation, SHA-256 artifact and corpus integrity, capability snapshots, generic external-state references; continuity endpoints and three read-only MCP tools; `/backup` carries the continuity record while soul files stay out |

@@ -23,7 +23,7 @@ log = logging.getLogger("jnaapakam.store")
 # upgrade runs exactly once per database. v0.1 files report 0.
 SCHEMA_VERSION = 4
 
-PROTOCOL_VERSION = "0.3"
+PROTOCOL_VERSION = "0.4"
 
 GENERATION_STATUSES = ("staged", "promoted", "rejected")
 
@@ -819,15 +819,28 @@ class Store:
             "SELECT COUNT(*) AS c FROM memories WHERE namespace = ?", (namespace,)
         ).fetchone()["c"]
 
-    def _corpus_digest(self, namespace: str | None = None) -> str:
+    def _corpus_digests(self, namespace: str | None = None) -> dict:
         sql, params = "SELECT * FROM memories", ()
         if namespace is not None:
             sql, params = sql + " WHERE namespace = ?", (namespace,)
-        return lineage.corpus_digest(dict(row) for row in self.db.execute(sql, params))
+        return lineage.corpus_digests(dict(row) for row in self.db.execute(sql, params))
+
+    def _corpus_digest(self, namespace: str | None = None) -> str:
+        return self._corpus_digests(namespace)["content"]
+
+    @_synchronized
+    def corpus_digests(self, namespace: str | None = None) -> dict:
+        """Both corpus digests: what the agent knows, and how it currently reads it.
+
+        See lineage.corpus_digests. The two are separate because they fail for
+        different reasons: content says memories were lost or altered, state says
+        they all arrived but are now interpreted differently.
+        """
+        return self._corpus_digests(namespace)
 
     @_synchronized
     def corpus_digest(self, namespace: str | None = None) -> str:
-        """One digest over the whole memory corpus. See lineage.corpus_digest."""
+        """The content digest alone. See corpus_digests for the state digest too."""
         return self._corpus_digest(namespace)
 
     # ---- reads ----
@@ -985,17 +998,22 @@ class Store:
         generation_id = self._as_generation_id(generation_id)
         if self.get_generation(generation_id) is None:
             raise ValueError(f"no generation with id {generation_id}")
-        digest, records = self._corpus_digest(namespace), self._memory_count(namespace)
-        self.db.execute(
-            "INSERT OR REPLACE INTO generation_artifacts (generation_id, name, algorithm, digest, "
-            "bytes, records, recorded_at) VALUES (?, ?, 'sha256', ?, NULL, ?, ?)",
-            (generation_id, lineage.CORPUS_ARTIFACT, digest, records, _now()),
-        )
+        digests, records, now = self._corpus_digests(namespace), self._memory_count(namespace), _now()
+        for name, digest in (
+            (lineage.CORPUS_ARTIFACT, digests["content"]),
+            (lineage.STATE_ARTIFACT, digests["state"]),
+        ):
+            self.db.execute(
+                "INSERT OR REPLACE INTO generation_artifacts (generation_id, name, algorithm, "
+                "digest, bytes, records, recorded_at) VALUES (?, ?, 'sha256', ?, NULL, ?, ?)",
+                (generation_id, name, digest, records, now),
+            )
         self.db.commit()
         return {
             "status": "sealed",
             "generation": generation_id,
-            "digest": digest,
+            "digest": digests["content"],
+            "state_digest": digests["state"],
             "records": records,
         }
 
@@ -1010,12 +1028,13 @@ class Store:
             "detail": f"generation declares {generation['agent_id']}, this store holds {expected}",
         }
 
-    def _check_memory(self, recorded: dict) -> dict:
+    def _check_memory(self, recorded: dict, live: dict) -> dict:
+        """Did the knowledge itself arrive intact?"""
         sealed = recorded.get(lineage.CORPUS_ARTIFACT)
         if sealed is None:
             return {"status": "skipped", "detail": "no memory corpus was sealed for this generation"}
-        live, records = self._corpus_digest(), self._memory_count()
-        if live == sealed["digest"]:
+        records = self._memory_count()
+        if live["content"] == sealed["digest"]:
             return {
                 "status": "pass",
                 "detail": f"{records} records match the sealed corpus digest",
@@ -1024,10 +1043,43 @@ class Store:
         return {
             "status": "fail",
             "detail": (
-                f"corpus digest no longer matches: {sealed['records']} records were sealed, "
-                f"{records} are present now"
+                f"corpus content digest no longer matches: {sealed['records']} records were "
+                f"sealed, {records} are present now — memories were lost or altered"
             ),
             "records": records,
+        }
+
+    def _check_semantic_state(self, recorded: dict, live: dict) -> dict:
+        """Is that knowledge still read the same way?
+
+        The failure this exists for: a migration carries every memory across but
+        drops the correction chain, so a fact the agent had already retracted
+        becomes current again. Every byte of text is present, the content digest
+        matches, and the agent is wrong.
+        """
+        sealed = recorded.get(lineage.STATE_ARTIFACT)
+        if sealed is None:
+            return {
+                "status": "skipped",
+                "detail": "no semantic state digest was sealed for this generation",
+            }
+        if live["state"] == sealed["digest"]:
+            return {
+                "status": "pass",
+                "detail": "validity, archival, corrections and links match the sealed state",
+            }
+        content_intact = recorded.get(lineage.CORPUS_ARTIFACT) and (
+            live["content"] == recorded[lineage.CORPUS_ARTIFACT]["digest"]
+        )
+        return {
+            "status": "fail",
+            "detail": (
+                "the memories are all present and unaltered, but they are interpreted "
+                "differently now — a correction chain, archival flag, validity interval or "
+                "consolidation link changed"
+                if content_intact
+                else "semantic state no longer matches the sealed state"
+            ),
         }
 
     def _check_recall(self, probes) -> dict:
@@ -1123,9 +1175,11 @@ class Store:
             raise ValueError(f"no generation with id {generation_id}")
 
         recorded = {a["name"]: a for a in self.artifacts(generation_id)}
+        live = self._corpus_digests()
         checks = {
             "identity": self._check_identity(generation),
-            "memory": self._check_memory(recorded),
+            "memory": self._check_memory(recorded, live),
+            "semantic_state": self._check_semantic_state(recorded, live),
             "recall": self._check_recall(probes),
             "soul": self._check_soul(recorded, artifacts),
             "context": self._check_context(generation),
@@ -1335,7 +1389,9 @@ class Store:
         left = {a["name"]: a for a in self.artifacts(before_id)}
         right = {a["name"]: a for a in self.artifacts(after_id)}
         artifacts = {}
-        for name in sorted((left.keys() | right.keys()) - {lineage.CORPUS_ARTIFACT}):
+        for name in sorted(
+            (left.keys() | right.keys()) - {lineage.CORPUS_ARTIFACT, lineage.STATE_ARTIFACT}
+        ):
             if name not in left:
                 artifacts[name] = "added"
             elif name not in right:
@@ -1345,11 +1401,15 @@ class Store:
                     "unchanged" if left[name]["digest"] == right[name]["digest"] else "changed"
                 )
 
-        sealed_before, sealed_after = left.get(lineage.CORPUS_ARTIFACT), right.get(lineage.CORPUS_ARTIFACT)
-        if sealed_before and sealed_after:
-            corpus = "unchanged" if sealed_before["digest"] == sealed_after["digest"] else "changed"
-        else:
-            corpus = "unknown"
+        def compare(artifact):
+            first, second = left.get(artifact), right.get(artifact)
+            if not (first and second):
+                return "unknown"
+            return "unchanged" if first["digest"] == second["digest"] else "changed"
+
+        sealed_before = left.get(lineage.CORPUS_ARTIFACT)
+        sealed_after = right.get(lineage.CORPUS_ARTIFACT)
+        corpus, state = compare(lineage.CORPUS_ARTIFACT), compare(lineage.STATE_ARTIFACT)
 
         difference = {
             "from": before_id,
@@ -1366,6 +1426,7 @@ class Store:
                     sealed_after["records"] if sealed_after else None,
                 ],
                 "corpus": corpus,
+                "state": state,
             },
         }
         external = lineage.diff_external_state(before["manifest"], after["manifest"])
@@ -1387,13 +1448,15 @@ class Store:
         memories = [dict(r) for r in self.db.execute("SELECT * FROM memories ORDER BY id")]
         consolidations = [dict(r) for r in self.db.execute("SELECT * FROM consolidations ORDER BY id")]
         current = self._meta("current_generation")
+        digests = self._corpus_digests()
         return {
             "version": PROTOCOL_VERSION,
             "exported_at": _now(),
             "agent_id": self._meta("agent_id"),
             "agent_created_at": self._meta("agent_created_at"),
             "current_generation": int(current) if current else None,
-            "corpus_digest": self._corpus_digest(),
+            "corpus_digest": digests["content"],
+            "corpus_state_digest": digests["state"],
             "memories": memories,
             "consolidations": consolidations,
             "generations": [

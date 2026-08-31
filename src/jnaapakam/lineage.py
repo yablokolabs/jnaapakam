@@ -38,6 +38,12 @@ SUPPORTED_ALGORITHM = "sha256"
 ARTIFACT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 CORPUS_ARTIFACT = "memory_corpus"
+STATE_ARTIFACT = "memory_state"
+
+# Written into a state digest where a cross-row link points at a memory that is not
+# in the corpus. A dangling link and a dropped link are different failures, and
+# neither may hash the same as an intact one.
+MISSING_LINK = "\x00missing"
 
 # Sections the protocol gives meaning to. Every one is optional: a minimal
 # compliant generation declares `{}` and discloses no hardware, model, or
@@ -110,36 +116,116 @@ def is_artifact_name(value) -> bool:
     return isinstance(value, str) and bool(ARTIFACT_NAME_PATTERN.match(value))
 
 
-CORPUS_FIELDS = ("namespace", "source", "kind", "summary", "raw_text", "created_at", "event_time")
+CONTENT_FIELDS = ("namespace", "source", "kind", "summary", "raw_text", "created_at", "event_time")
 
 
-def memory_digest(memory: dict) -> str:
-    """Hash the parts of a memory that carry meaning.
+def _canonical(payload: dict) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
 
-    Deliberately excluded: `id` (a restore may renumber rows), `access_count` and
-    `last_accessed` (a recall is usage, not a change of knowledge), and
-    `consolidated`, `superseded_by`, `valid_to`, `archived` (all mutate as the
-    store does its own housekeeping). Including any of them would make the corpus
-    digest drift while nothing was actually learned or forgotten.
 
-    `importance` is formatted to a fixed number of decimals rather than dumped as
-    a float, so the digest is reproducible outside Python.
+def _as_list(value) -> list:
+    """Read a JSON-array column that may arrive as text or as an already-parsed list."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+    return value if isinstance(value, list) else []
+
+
+def memory_content_digest(memory: dict) -> str:
+    """Hash what a memory *knows*.
+
+    Covers the text, its extracted entities and topics, its provenance and its
+    place in time. Entities and topics are included because they are indexed and
+    therefore decide what is findable: corrupting them changes what the agent can
+    recall even when `raw_text` is untouched.
+
+    Excluded: `id` (a restore may renumber rows), and `access_count` /
+    `last_accessed` (a recall is usage, not a change of knowledge). Everything
+    about how this memory is currently *interpreted* — validity, archival,
+    supersession, links — belongs to the state digest instead.
+
+    Tags are sorted, because reordering extracted tags is not new knowledge.
+    `importance` is formatted to fixed decimals rather than dumped as a float, so
+    the digest is reproducible outside Python.
     """
-    payload = {field: ("" if memory.get(field) is None else str(memory.get(field)))
-               for field in CORPUS_FIELDS}
+    payload = {
+        field: ("" if memory.get(field) is None else str(memory.get(field)))
+        for field in CONTENT_FIELDS
+    }
     payload["importance"] = f"{float(memory.get('importance') or 0.0):.6f}"
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return digest_bytes(canonical.encode("utf-8"))
+    payload["entities"] = sorted(str(e) for e in _as_list(memory.get("entities")))
+    payload["topics"] = sorted(str(t) for t in _as_list(memory.get("topics")))
+    return digest_bytes(_canonical(payload))
 
 
-def corpus_digest(memories) -> str:
-    """A single digest over a whole memory corpus, independent of order.
+def memory_state_digest(memory: dict, content_by_id: dict) -> str:
+    """Hash how a memory is currently *read*.
 
-    Per-memory digests are sorted before being combined, so the same knowledge
-    hashes identically whether it was restored into a fresh database or grew
-    there — which is the only way the digest can survive a migration.
+    Content alone is not continuity. Two stores can hold identical text while
+    disagreeing about which memories are still true — and an agent restored into
+    the second one believes a fact its predecessor had already retracted. So this
+    covers the validity interval, archival, the correction chain, and the
+    consolidation graph.
+
+    Cross-row links are hashed as the *content digest of what they point at*,
+    never as a row id. That is what lets the digest survive a restore that
+    renumbers every row while still noticing that a link vanished: `17 -> 26`
+    becoming `3 -> 91` hashes identically, `17 -> nothing` does not.
     """
-    return digest_bytes("\n".join(sorted(memory_digest(m) for m in memories)).encode("utf-8"))
+
+    def target(reference) -> str:
+        if reference is None:
+            return ""
+        return content_by_id.get(reference, MISSING_LINK)
+
+    payload = {
+        "content": content_by_id.get(memory.get("id")) or memory_content_digest(memory),
+        "valid_from": str(memory.get("valid_from") or memory.get("created_at") or ""),
+        "valid_to": str(memory.get("valid_to") or ""),
+        "archived": "1" if memory.get("archived") else "0",
+        "superseded_by": target(memory.get("superseded_by")),
+        "connections": sorted(
+            f"{target(link.get('linked_to'))}\x00{link.get('relationship') or ''}"
+            for link in _as_list(memory.get("connections"))
+            if isinstance(link, dict)
+        ),
+    }
+    return digest_bytes(_canonical(payload))
+
+
+def corpus_digests(memories) -> dict:
+    """Two digests over a whole corpus, both independent of order and row ids.
+
+    * ``content`` — what knowledge exists
+    * ``state``   — how that knowledge is currently interpreted and retrieved
+
+    They are separate because they fail for different reasons and demand different
+    responses. A content mismatch means memories were lost or altered. A state
+    mismatch means every memory arrived intact but the agent now reads them
+    differently — a dropped correction chain being the case that matters most.
+
+    Per-memory digests are sorted before being combined, and duplicates are kept:
+    losing one of two identical memories is a real loss.
+
+    Two memories whose content is byte-identical necessarily share a content
+    digest, so a link to either hashes the same. That is a deliberate limit and
+    the right reading — if two memories say exactly the same thing, pointing at
+    one or the other is not a semantic difference.
+    """
+    memories = list(memories)
+    content_by_id = {memory.get("id"): memory_content_digest(memory) for memory in memories}
+    contents = sorted(content_by_id[memory.get("id")] for memory in memories)
+    states = sorted(memory_state_digest(memory, content_by_id) for memory in memories)
+    return {
+        "content": digest_bytes("\n".join(contents).encode("utf-8")),
+        "state": digest_bytes("\n".join(states).encode("utf-8")),
+    }
 
 
 # ---- manifests ---------------------------------------------------------
