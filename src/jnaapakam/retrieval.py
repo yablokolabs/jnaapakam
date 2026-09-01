@@ -12,6 +12,12 @@ from datetime import datetime, timezone
 DEFAULT_WEIGHTS = {"relevance": 0.6, "recency": 0.25, "importance": 0.15}
 DEFAULT_HALFLIFE_DAYS = 30.0
 
+# How much of the relevance term comes from meaning rather than words, when a
+# semantic score is present at all. Half and half: BM25 is precise about the words
+# an operator actually typed, embeddings are right about what they meant, and
+# neither is trustworthy enough alone to be worth silencing the other.
+DEFAULT_SEMANTIC_WEIGHT = 0.5
+
 
 def _parse_time(value) -> datetime | None:
     if isinstance(value, datetime):
@@ -39,15 +45,29 @@ def recency_score(created_at, now, halflife_days: float = DEFAULT_HALFLIFE_DAYS)
     return 0.5 ** (age_days / halflife_days)
 
 
+def relevance_score(candidate: dict, semantic_weight: float = DEFAULT_SEMANTIC_WEIGHT) -> float:
+    """Blend lexical and semantic relevance, using whichever are present.
+
+    A candidate with no `semantic` key scores exactly as it did before embeddings
+    existed — the blend only applies where there is something to blend.
+    """
+    lexical = float(candidate.get("lexical") or 0.0)
+    if candidate.get("semantic") is None:
+        return lexical
+    semantic = max(0.0, min(1.0, float(candidate["semantic"])))
+    return (1.0 - semantic_weight) * lexical + semantic_weight * semantic
+
+
 def score(
     candidate: dict,
     now,
     weights: dict | None = None,
     halflife_days: float = DEFAULT_HALFLIFE_DAYS,
+    semantic_weight: float = DEFAULT_SEMANTIC_WEIGHT,
 ) -> float:
     w = weights or DEFAULT_WEIGHTS
     return (
-        w["relevance"] * float(candidate.get("lexical") or 0.0)
+        w["relevance"] * relevance_score(candidate, semantic_weight)
         + w["recency"] * recency_score(candidate.get("created_at"), now, halflife_days)
         + w["importance"] * float(candidate.get("importance") or 0.0)
     )
@@ -59,6 +79,7 @@ def rank(
     weights: dict | None = None,
     halflife_days: float = DEFAULT_HALFLIFE_DAYS,
     limit: int | None = None,
+    semantic_weight: float = DEFAULT_SEMANTIC_WEIGHT,
 ) -> list[dict]:
     """Order candidates best-first, attaching the score that produced the order.
 
@@ -68,7 +89,7 @@ def rank(
     scored = []
     for candidate in candidates:
         enriched = dict(candidate)
-        enriched["score"] = score(candidate, now, weights, halflife_days)
+        enriched["score"] = score(candidate, now, weights, halflife_days, semantic_weight)
         scored.append(enriched)
     scored.sort(key=lambda c: c["score"], reverse=True)
     return scored[:limit] if limit is not None else scored

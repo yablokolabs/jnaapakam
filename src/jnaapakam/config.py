@@ -49,6 +49,10 @@ class Config:
     # A path to an Ed25519 private key. Unset means seals record integrity only:
     # they prove a corpus did not drift, not who sealed it.
     signing_key: str | None = None
+    # Unset means lexical retrieval only. Naming a model turns on semantic search,
+    # at the cost of an embedding call per memory and a similarity scan per query.
+    embedding_model: str | None = None
+    semantic_weight: float = 0.5
     watch_dir: str | None = None
     max_body_bytes: int = 1_000_000
     retrieval_limit: int = 12
@@ -98,6 +102,8 @@ class Config:
             "consolidate_every_minutes": int(os.getenv("CONSOLIDATE_INTERVAL", "30")),
             "expire_after_days": int(os.getenv("MEMORY_EXPIRE_AFTER_DAYS") or 0) or None,
             "signing_key": os.getenv("MEMORY_SIGNING_KEY") or None,
+            "embedding_model": os.getenv("MEMORY_EMBEDDING_MODEL") or None,
+            "semantic_weight": float(os.getenv("MEMORY_SEMANTIC_WEIGHT") or 0.5),
             "watch_dir": os.getenv("MEMORY_WATCH") or None,
         }
         values.update({k: v for k, v in overrides.items() if v is not None})

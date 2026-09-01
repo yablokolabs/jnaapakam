@@ -42,6 +42,7 @@ Some frameworks bolt on vector databases or conversation logs, but there's no st
 ```bash
 pip install jnaapakam                 # one dependency: aiohttp
 pip install "jnaapakam[signing]"      # + cryptography, to sign continuity seals
+pip install "jnaapakam[embeddings]"   # + numpy, for semantic retrieval
 ```
 
 Or from source:
@@ -294,6 +295,7 @@ Three standard files that any agent framework can read.
 | `/prune` requires one policy | | omitting both `keep` and `older_than_days` is a `400`, not a silent default |
 | `/namespaces` | GET | List namespaces with memory counts |
 | `/dashboard` | GET | Read-only operator view in a browser. Local binds only |
+| `/embed` | POST | Backfill embeddings for memories stored before the model was configured |
 | `/backup` | GET | Export memories and consolidations as JSON |
 | `/restore` | POST | Import from backup JSON |
 | `/mcp` | POST | MCP JSON-RPC endpoint (also served on `/`) |
@@ -340,6 +342,8 @@ own lineage; it cannot rewrite it.
 | `CONSOLIDATE_INTERVAL` | `30` | Minutes between consolidation cycles |
 | `MEMORY_EXPIRE_AFTER_DAYS` | *(unset)* | Archive memories untouched for this many days. Unset means nothing expires |
 | `MEMORY_SIGNING_KEY` | *(unset)* | Path to an Ed25519 private key. Unset means seals carry integrity but not authenticity |
+| `MEMORY_EMBEDDING_MODEL` | *(unset)* | Embedding model for semantic retrieval. Unset means lexical search only |
+| `MEMORY_SEMANTIC_WEIGHT` | `0.5` | How much of relevance comes from meaning rather than matching words |
 
 ### CLI
 
@@ -490,6 +494,45 @@ Four guardrails, each because the failure mode is real:
 Reconciliation never runs on the ingest path, so a slow or failing judge cannot
 block a write. Tune with `reconcile_min_confidence`, `reconcile_min_overlap`, and
 `reconcile_max_comparisons`.
+
+## Semantic retrieval
+
+BM25 ranks memories that share words with the query. It cannot reach the memory
+that says the same thing in other words — and that is most of what an agent is
+asked to remember. Embeddings close that gap, and they are off by default:
+
+```bash
+pip install "jnaapakam[embeddings]"
+export MEMORY_EMBEDDING_MODEL=text-embedding-3-small   # or a local model
+export OPENAI_API_KEY=sk-...                           # or LLM_BASE_URL for a local endpoint
+```
+
+```bash
+curl "http://localhost:8889/search?q=which+data+warehouse"
+# finds "the team standardised on ClickHouse for analytics" — no shared words
+```
+
+Semantic hits are **added to** the candidate pool, not used to reorder it. Re-ranking
+what BM25 already found could never surface the memory that shares no words with the
+query, which is the only reason to run an embedding model at all. Relevance becomes
+`(1 - w)·lexical + w·semantic`, with `w` from `MEMORY_SEMANTIC_WEIGHT`.
+
+The capability is detected at runtime, not just configured: a model name without
+numpy installed logs a warning and leaves retrieval lexical, rather than presenting a
+feature that silently never runs. `/status` reports coverage, because a half-embedded
+corpus answers half its queries lexically and a flag cannot tell you that:
+
+```bash
+curl localhost:8889/status
+# "embeddings": {"model": "text-embedding-3-small", "enabled": true, "embedded": 1841, "total": 1842}
+
+curl -X POST "localhost:8889/embed?limit=500"     # backfill what predates the model
+```
+
+New memories are embedded at ingest. If the embedding endpoint is down the memory is
+still stored and still findable lexically — losing semantic relevance degrades
+retrieval, it does not fail it. Anthropic publishes no embeddings API, so this routes
+to OpenAI or to whatever `LLM_BASE_URL` serves.
 
 ## Dashboard
 
@@ -812,7 +855,7 @@ CMD ["jnaapakam", "serve"]
 - [x] Memory expiry and retention policies: age-based, scheduled, still reversible
 - [x] Signed continuity records: Ed25519 seals, optional dependency, provenance on request
 - [x] Dashboard UI: read-only, local binds only, no build step
-- [ ] Optional embeddings as a runtime-detected capability
+- [x] Optional embeddings as a runtime-detected capability
 - [ ] Pluggable storage backends (Postgres/pgvector, embedded graph)
 - [ ] Encryption at rest
 

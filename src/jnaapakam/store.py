@@ -7,6 +7,7 @@ jnaapakam && jnaapakam serve` work offline on first run.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import logging
@@ -15,13 +16,13 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
-from . import lineage, retention, retrieval, signing
+from . import embeddings, lineage, retention, retrieval, signing
 
 log = logging.getLogger("jnaapakam.store")
 
 # Bumped when the on-disk layout changes. Tracked in `PRAGMA user_version` so an
 # upgrade runs exactly once per database. v0.1 files report 0.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 PROTOCOL_VERSION = "0.4"
 
@@ -140,6 +141,19 @@ CREATE TABLE IF NOT EXISTS generation_artifacts (
     public_key TEXT,
     PRIMARY KEY (generation_id, name)
 );
+
+-- One vector per memory. The model is stored with it because vectors from
+-- different models are not comparable, and a changed model must not silently
+-- rank yesterday's embeddings against today's queries.
+CREATE TABLE IF NOT EXISTS memory_embeddings (
+    memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    embedded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_embeddings_model ON memory_embeddings(model);
 
 CREATE INDEX IF NOT EXISTS idx_generations_parent ON generations(parent_id);
 CREATE INDEX IF NOT EXISTS idx_migrations_target ON migrations(to_generation, id DESC);
@@ -548,15 +562,29 @@ class Store:
         record_access: bool = True,
         weights: dict | None = None,
         halflife_days: float | None = None,
+        query_vector=None,
+        embedding_model: str | None = None,
+        semantic_weight: float = retrieval.DEFAULT_SEMANTIC_WEIGHT,
     ) -> list[dict]:
         """Rank memories by content relevance, then recency and importance.
 
         Replaces v0.1's `ORDER BY created_at DESC LIMIT 50`, under which anything
         older than the 50 most recent rows was unreachable regardless of content.
+
+        With a `query_vector`, semantically similar memories are added to the pool
+        rather than merely reordering it: re-ranking what BM25 returned could never
+        surface the memory that shares no words with the query, which is the only
+        reason to run an embedding model at all.
         """
         match = build_match_query(query, self.max_query_terms)
+        semantic = self._semantic_matches(
+            query_vector, embedding_model, namespace, include_superseded, include_archived,
+            candidate_pool,
+        )
         if not match:
-            return []
+            return self._rank_semantic_only(
+                semantic, limit, weights, halflife_days, semantic_weight, record_access
+            )
 
         sql = (
             "SELECT m.*, bm25(memories_fts) AS bm25_score "
@@ -577,16 +605,31 @@ class Store:
             log.warning("FTS query failed for %r: %s", query, exc)
             return []
 
-        if not rows:
+        if not rows and not semantic:
             return []
 
         # bm25() is more negative for better matches; flip and scale to [0, 1].
         raw = [-row["bm25_score"] for row in rows]
-        best = max(raw) or 1.0
+        best = max(raw, default=0.0) or 1.0
         candidates = []
+        seen = set()
         for row, relevance in zip(rows, raw, strict=True):
             memory = self._row_to_memory(row)
             memory["lexical"] = max(0.0, relevance / best)
+            if semantic:
+                memory["semantic"] = semantic.get(memory["id"], 0.0)
+            candidates.append(memory)
+            seen.add(memory["id"])
+
+        # Semantic hits BM25 never saw: no shared words, so lexical relevance is 0.
+        for memory_id, score in semantic.items():
+            if memory_id in seen:
+                continue
+            memory = self.get_memory(memory_id)
+            if memory is None:
+                continue
+            memory["lexical"] = 0.0
+            memory["semantic"] = score
             candidates.append(memory)
 
         ranked = retrieval.rank(
@@ -595,6 +638,7 @@ class Store:
             weights=weights,
             halflife_days=halflife_days or retrieval.DEFAULT_HALFLIFE_DAYS,
             limit=limit,
+            semantic_weight=semantic_weight,
         )
         if record_access:
             try:
@@ -604,6 +648,104 @@ class Store:
                 # write lock held by another process must still return results.
                 log.warning("Could not record access counts: %s", exc)
         return ranked
+
+    def _semantic_matches(
+        self, query_vector, model, namespace, include_superseded, include_archived, pool
+    ) -> dict:
+        """`{memory_id: similarity}` for the closest vectors in this namespace."""
+        if query_vector is None or not model or not embeddings.available():
+            return {}
+        sql = (
+            "SELECT e.memory_id, e.vector FROM memory_embeddings e "
+            "JOIN memories m ON m.id = e.memory_id "
+            "WHERE e.model = ? AND m.namespace = ? "
+        )
+        params: list = [model, namespace or ""]
+        if not include_superseded:
+            sql += "AND m.superseded_by IS NULL "
+        if not include_archived:
+            sql += "AND m.archived = 0 "
+        rows = [(r["memory_id"], r["vector"]) for r in self.db.execute(sql, params).fetchall()]
+        try:
+            ranked = embeddings.rank_by_similarity(query_vector, rows, pool)
+        except ValueError as exc:
+            # Mixed dimensions mean the model changed without a re-embed. Lexical
+            # search still works, so degrade to it rather than failing the query.
+            log.warning("Skipping semantic search: %s", exc)
+            return {}
+        return {memory_id: score for memory_id, score in ranked if score > 0.0}
+
+    def _rank_semantic_only(
+        self, semantic, limit, weights, halflife_days, semantic_weight, record_access
+    ) -> list[dict]:
+        """A query with no usable FTS terms can still be answered by meaning."""
+        if not semantic:
+            return []
+        candidates = []
+        for memory_id, score in semantic.items():
+            memory = self.get_memory(memory_id)
+            if memory is None:
+                continue
+            memory["lexical"] = 0.0
+            memory["semantic"] = score
+            candidates.append(memory)
+        ranked = retrieval.rank(
+            candidates,
+            now=_now(),
+            weights=weights,
+            halflife_days=halflife_days or retrieval.DEFAULT_HALFLIFE_DAYS,
+            limit=limit,
+            semantic_weight=semantic_weight,
+        )
+        if record_access:
+            with contextlib.suppress(sqlite3.Error):
+                self._record_access([m["id"] for m in ranked])
+        return ranked
+
+    # ---- embeddings ----------------------------------------------------
+
+    @_synchronized
+    def set_embedding(self, memory_id: int, model: str, vector) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO memory_embeddings "
+            "(memory_id, model, dimensions, vector, embedded_at) VALUES (?, ?, ?, ?, ?)",
+            (int(memory_id), model, len(vector), embeddings.pack(vector), _now()),
+        )
+        self.db.commit()
+
+    @_synchronized
+    def get_embedding(self, memory_id: int) -> list[float] | None:
+        row = self.db.execute(
+            "SELECT vector FROM memory_embeddings WHERE memory_id = ?", (int(memory_id),)
+        ).fetchone()
+        return embeddings.unpack(row["vector"]) if row else None
+
+    @_synchronized
+    def unembedded(self, model: str, limit: int = 100, namespace: str | None = None) -> list[dict]:
+        """Memories with no vector for this model — what a backfill has left to do."""
+        sql = (
+            "SELECT m.id, m.summary, m.raw_text FROM memories m "
+            "LEFT JOIN memory_embeddings e ON e.memory_id = m.id AND e.model = ? "
+            "WHERE e.memory_id IS NULL "
+        )
+        params: list = [model]
+        if namespace is not None:
+            sql += "AND m.namespace = ? "
+            params.append(namespace or "")
+        sql += "ORDER BY m.id LIMIT ?"
+        params.append(limit)
+        return [dict(row) for row in self.db.execute(sql, params).fetchall()]
+
+    @_synchronized
+    def embedding_coverage(self, model: str | None = None) -> dict:
+        total = self.db.execute("SELECT COUNT(*) AS n FROM memories").fetchone()["n"]
+        sql = "SELECT COUNT(*) AS n FROM memory_embeddings"
+        params: list = []
+        if model:
+            sql += " WHERE model = ?"
+            params.append(model)
+        embedded = self.db.execute(sql, params).fetchone()["n"]
+        return {"embedded": embedded, "total": total}
 
     @_synchronized
     def list_memories(self, limit: int = 50, namespace: str = "") -> list[dict]:

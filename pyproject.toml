@@ -26,7 +26,10 @@ dependencies = ["aiohttp>=3.9.0"]
 # Signing is optional so the base install stays at one dependency. Without it,
 # seals still carry digests; they just cannot be signed or verified.
 signing = ["cryptography>=42"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6", "cryptography>=42"]
+# Semantic retrieval scans every vector in a namespace per query; numpy is what
+# makes that a matrix multiply instead of a Python loop.
+embeddings = ["numpy>=1.24"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6", "cryptography>=42", "numpy>=1.24"]
 
 [project.scripts]
 jnaapakam = "jnaapakam.cli:main"

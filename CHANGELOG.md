@@ -39,8 +39,29 @@ All notable changes to jñāpakaṁ are recorded here. The protocol specificatio
   because exposing the API should not also publish a browsable window onto the
   agent's memory. It reads only documented endpoints and never writes.
 
+- **Optional semantic retrieval.** With `MEMORY_EMBEDDING_MODEL` set, memories are
+  embedded at ingest and semantically similar ones are **added to** the candidate
+  pool rather than merely reordering it — re-ranking BM25 hits could never surface
+  the memory that shares no words with the query, which is the only reason to run an
+  embedding model. Relevance becomes `(1 - w)·lexical + w·semantic`.
+- Runtime-detected, not merely configured: without numpy the capability reports off
+  and retrieval stays lexical, with a warning, rather than a configured feature that
+  silently never runs. `pip install jnaapakam[embeddings]`.
+- `POST /embed` backfills memories stored before the model was configured, and
+  `/status` reports embedding coverage — a half-embedded corpus answers half its
+  queries lexically, which a feature flag cannot tell an operator.
+- An embedding failure never costs a memory: ingest still stores it and lexical
+  search still finds it.
+- Protocol §5 gains the optional semantic term, the rule that it must widen the
+  candidate set rather than reorder it, and the requirement to fall back to lexical
+  ranking rather than fail.
+
 ### Changed
 
+- `/status`, `/health` and the MCP server info now report the installed package
+  version instead of a hardcoded `0.4.0` that went stale at the last release.
+- Schema version 6: a `memory_embeddings` table, storing the model with each vector
+  so vectors from different models are never compared.
 - Schema version 5: `generation_artifacts` gains `signature` and `public_key`.
   Additive — seals written before signing existed read back as unsigned.
 

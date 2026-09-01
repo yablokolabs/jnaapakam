@@ -10,12 +10,14 @@ import asyncio
 import hmac
 import json
 import logging
+from importlib import metadata
 from pathlib import Path
 
 from aiohttp import web
 
+from . import embeddings
 from .config import Config
-from .llm import ExtractionError, extract_json
+from .llm import ExtractionError, embed, extract_json
 from .reconcile import Reconciler
 from .store import Store
 
@@ -52,7 +54,15 @@ Answer the question based ONLY on the provided memories. Reference memory IDs li
 If no relevant memories exist, say so honestly. Be thorough but concise."""
 
 MCP_PROTOCOL_VERSION = "2025-03-26"
-MCP_SERVER_INFO = {"name": "jnaapakam", "version": "0.4.0"}
+# Read from the installed distribution rather than repeated as a literal: three
+# copies of a version string is three places to forget, and /status then reports a
+# build that is not the one running.
+try:
+    VERSION = metadata.version("jnaapakam")
+except metadata.PackageNotFoundError:  # running from a source tree, uninstalled
+    VERSION = "0+unknown"
+
+MCP_SERVER_INFO = {"name": "jnaapakam", "version": VERSION}
 
 NAMESPACE_PARAM = {
     "type": "string",
@@ -230,6 +240,13 @@ def build_app(config: Config, chat) -> web.Application:
         max_query_terms=config.max_query_terms,
         signing_key=config.signing_key,
     ).initialize()
+
+    # Runtime-detected: a model name alone is not the capability. Without numpy
+    # there is nothing to compare vectors with, so the honest state is "off" rather
+    # than a configured feature that silently never runs.
+    semantic_enabled = bool(config.embedding_model) and embeddings.available()
+    if config.embedding_model and not semantic_enabled:
+        log.warning("MEMORY_EMBEDDING_MODEL is set but %s", embeddings.INSTALL_HINT)
     app[CONFIG_KEY] = config
     app[STORE_KEY] = store
 
@@ -259,12 +276,41 @@ def build_app(config: Config, chat) -> web.Application:
             kind,
         )
         log.info("Stored memory #%s", memory_id)
+        await embed_memory(memory_id, str(data.get("summary") or "") + "\n" + text[:5000])
         return {
             "status": "stored",
             "memory_id": memory_id,
             "namespace": namespace,
             "summary": data.get("summary", ""),
         }
+
+    async def embed_memory(memory_id: int, text: str) -> bool:
+        """Store a vector for one memory. Best effort, and loudly so.
+
+        A memory that could not be embedded is still stored and still findable by
+        BM25, so an embedding endpoint that is down degrades retrieval rather than
+        dropping what the agent was told. The failure is logged, not swallowed
+        silently, and `/status` reports the coverage gap it leaves behind.
+        """
+        if not semantic_enabled:
+            return False
+        try:
+            vectors = await embed([text[:8000]], config.embedding_model)
+            await in_thread(store.set_embedding, memory_id, config.embedding_model, vectors[0])
+        except Exception as exc:
+            log.warning("Could not embed memory #%s: %s", memory_id, exc)
+            return False
+        return True
+
+    async def embed_query(text: str):
+        """The query vector, or None when semantic search is unavailable right now."""
+        if not semantic_enabled:
+            return None
+        try:
+            return (await embed([text[:8000]], config.embedding_model))[0]
+        except Exception as exc:
+            log.warning("Semantic search unavailable for this query: %s", exc)
+            return None
 
     async def consolidate(namespace: str = "") -> dict:
         memories = await in_thread(store.unconsolidated, 20, namespace)
@@ -285,7 +331,15 @@ def build_app(config: Config, chat) -> web.Application:
         )
 
     async def answer(question: str, namespace: str = "") -> dict:
-        memories = await in_thread(store.search, question, config.retrieval_limit, namespace)
+        # /query retrieves through the same path as /search, semantic retrieval
+        # included: a question answered from lexical hits only would quietly be a
+        # worse answer than the same words typed into /search.
+        query_vector = await embed_query(question)
+        memories = await in_thread(
+            store.search, question, config.retrieval_limit, namespace, False, False,
+            200, True, config.weights, config.recency_halflife_days,
+            query_vector, config.embedding_model, config.semantic_weight,
+        )
         history = await in_thread(store.consolidation_history, 5)
         lines = ["## Retrieved Memories"]
         for memory in memories:
@@ -350,7 +404,7 @@ def build_app(config: Config, chat) -> web.Application:
         return web.json_response(
             {
                 "name": "jnaapakam",
-                "version": "0.4.0",
+                "version": VERSION,
                 "transport": "streamable-http",
                 "mcp_endpoint": "/mcp",
                 "tools": [tool["name"] for tool in MCP_TOOLS],
@@ -359,7 +413,7 @@ def build_app(config: Config, chat) -> web.Application:
 
     async def handle_health(request):
         """Liveness for platform startup probes: reachable without credentials."""
-        return web.json_response({"status": "ok", "name": "jnaapakam", "version": "0.4.0"})
+        return web.json_response({"status": "ok", "name": "jnaapakam", "version": VERSION})
 
     async def handle_dashboard(request):
         """A read-only operator view, served only where the server is already local.
@@ -380,7 +434,43 @@ def build_app(config: Config, chat) -> web.Application:
 
     async def handle_status(request):
         namespace = request.query.get("namespace")
-        return web.json_response(await in_thread(store.stats, namespace))
+        stats = await in_thread(store.stats, namespace)
+        if config.embedding_model:
+            # Coverage, not just "on": a half-embedded corpus answers half of its
+            # queries lexically, and an operator cannot see that from a flag.
+            coverage = await in_thread(store.embedding_coverage, config.embedding_model)
+            stats["embeddings"] = {
+                "model": config.embedding_model,
+                "enabled": semantic_enabled,
+                **coverage,
+            }
+        return web.json_response(stats)
+
+    async def handle_embed(request):
+        """Backfill vectors for memories stored before embeddings were configured."""
+        if not semantic_enabled:
+            raise web.HTTPConflict(
+                reason="no embedding model configured"
+                if not config.embedding_model
+                else embeddings.INSTALL_HINT
+            )
+        limit = _positive_int(request.query.get("limit"), "limit", 100, maximum=1000)
+        namespace = request.query.get("namespace")
+        pending = await in_thread(store.unembedded, config.embedding_model, limit, namespace)
+        embedded = 0
+        for memory in pending:
+            text = f"{memory['summary']}\n{memory['raw_text']}"
+            if await embed_memory(memory["id"], text):
+                embedded += 1
+        coverage = await in_thread(store.embedding_coverage, config.embedding_model)
+        return web.json_response(
+            {
+                "status": "embedded",
+                "embedded": embedded,
+                "attempted": len(pending),
+                "coverage": coverage,
+            }
+        )
 
     async def handle_namespaces(request):
         return web.json_response({"namespaces": await in_thread(store.namespaces)})
@@ -399,9 +489,11 @@ def build_app(config: Config, chat) -> web.Application:
         namespace = request.query.get("namespace") or ""
         include_superseded = request.query.get("include_superseded") == "true"
         include_archived = request.query.get("include_archived") == "true"
+        query_vector = await embed_query(query)
         memories = await in_thread(
             store.search, query, limit, namespace, include_superseded, include_archived,
             200, True, config.weights, config.recency_halflife_days,
+            query_vector, config.embedding_model, config.semantic_weight,
         )
         return web.json_response(
             {"query": query, "namespace": namespace, "memories": memories, "count": len(memories)}
@@ -826,6 +918,7 @@ def build_app(config: Config, chat) -> web.Application:
     app.router.add_post("/supersede", handle_supersede)
     app.router.add_post("/reconcile", handle_reconcile)
     app.router.add_get("/dashboard", handle_dashboard)
+    app.router.add_post("/embed", handle_embed)
     app.router.add_post("/prune", handle_prune)
     app.router.add_post("/archive", handle_archive)
     app.router.add_post("/restore", handle_restore)

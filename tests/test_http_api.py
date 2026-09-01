@@ -163,3 +163,12 @@ async def test_an_age_policy_still_applies_when_the_count_policy_is_satisfied(cl
 
     assert body["archived"] == 1, "keep=4 evicts nothing; the age policy still retires the stale one"
     assert store.get_memory(ids[0])["archived"] is True
+
+
+async def test_the_reported_version_is_the_installed_one(client):
+    """A hardcoded version string goes stale silently; /status then lies about the build."""
+    from importlib.metadata import version
+
+    body = await (await client.get("/health")).json()
+
+    assert body["version"] == version("jnaapakam")

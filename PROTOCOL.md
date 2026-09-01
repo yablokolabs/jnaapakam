@@ -645,17 +645,31 @@ Retrieval is a first-class protocol operation, not an implementation detail.
 
 - Retrieval MUST be content-addressed. Recency-only selection does not satisfy this protocol.
 - Ranking SHOULD combine lexical relevance, recency, and importance.
+- Semantic relevance from embeddings is OPTIONAL. Where supported it MUST widen the
+  candidate set rather than only reorder it: a memory sharing no words with the
+  query is exactly what lexical search cannot reach, and re-ranking lexical hits
+  would leave that memory as unreachable as before.
+- An implementation with embeddings configured MUST still answer when they are
+  unavailable — endpoint down, dependency missing, memory not yet embedded — by
+  falling back to lexical ranking. Losing semantic relevance degrades retrieval;
+  it MUST NOT fail it.
+- Vectors MUST be compared only against vectors from the same embedding model, and
+  an implementation SHOULD report embedding coverage: a half-embedded corpus answers
+  half its queries lexically, which an operator cannot infer from a feature flag.
 - Recency SHOULD decay rather than act as a hard cutoff, and a timestamp in the future MUST NOT rank above the present — clock skew between agents would otherwise let one memory dominate every result set.
 - Ranking MUST be deterministic for a fixed input set.
 
 ### Reference Ranking
 
 ```
-score = 0.6 · relevance + 0.25 · recency + 0.15 · importance
-recency = 0.5 ^ (age_days / halflife_days)      # halflife default 30 days
+score     = 0.6 · relevance + 0.25 · recency + 0.15 · importance
+relevance = (1 - w) · lexical + w · semantic    # w = 0 without embeddings
+recency   = 0.5 ^ (age_days / halflife_days)    # halflife default 30 days
 ```
 
-Weights and half-life are implementation-configurable.
+Weights, half-life and the semantic blend `w` are implementation-configurable. With
+no semantic score for a candidate, `relevance` is its lexical score unchanged, so a
+deployment without embeddings ranks exactly as it did before they existed.
 
 ## 5. Consolidation Cycle
 

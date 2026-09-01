@@ -145,6 +145,37 @@ async def _chat_openai(session, model, system, message, base_url, api_key) -> st
         return json.loads(body)["choices"][0]["message"]["content"]
 
 
+async def embed(texts: list[str], model: str) -> list[list[float]]:
+    """Embed texts through an OpenAI-compatible /embeddings endpoint.
+
+    Anthropic publishes no embeddings API, so this deliberately has no Anthropic
+    branch: an embedding model name routes to OPENAI_BASE, or to LLM_BASE_URL when
+    a custom endpoint is configured. Ollama, vLLM and LM Studio all serve this
+    shape, so a local embedder needs no special case.
+    """
+    if not texts:
+        return []
+    base_url = os.getenv("LLM_BASE_URL") or OPENAI_BASE
+    api_key = os.getenv("LLM_API_KEY", "") if os.getenv("LLM_BASE_URL") else os.getenv(
+        "OPENAI_API_KEY", ""
+    )
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    async with aiohttp.ClientSession() as session, session.post(
+        f"{base_url}/embeddings",
+        headers=headers,
+        json={"model": model, "input": texts},
+    ) as resp:
+        body = await resp.text()
+        if resp.status != 200:
+            raise LLMError(f"Embeddings {resp.status} for model {model}: {body[:300]}")
+        data = json.loads(body)["data"]
+    # The index field is authoritative: the spec permits results out of order.
+    return [item["embedding"] for item in sorted(data, key=lambda item: item["index"])]
+
+
 async def chat(model: str, system: str, message: str) -> str:
     """Send one turn, falling back to the other provider if the first is unreachable."""
     provider, model_name, base_url, api_key = resolve_model(model)
