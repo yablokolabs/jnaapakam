@@ -3,7 +3,7 @@
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from jnaapakam.server import build_app
+from jnaapakam.server import STORE_KEY, build_app
 
 
 @pytest.fixture
@@ -125,3 +125,41 @@ async def test_mcp_search_tool_returns_the_stored_memory(client):
     result = (await resp.json())["result"]
     assert result["isError"] is False
     assert result["structuredContent"]["memories"]
+
+
+async def test_prune_requires_a_policy_to_apply(client):
+    resp = await client.post("/prune")
+
+    assert resp.status == 400
+
+
+async def test_prune_applies_an_age_policy(client):
+    old = await _ingest(client, "a note from a project that wound up years ago")
+    client.app[STORE_KEY].db.execute(
+        "UPDATE memories SET created_at = '2020-01-01T00:00:00+00:00' WHERE id = ?", (old,)
+    )
+    client.app[STORE_KEY].db.commit()
+    fresh = await _ingest(client, "a note from this week about the release")
+
+    body = await (await client.post("/prune", params={"older_than_days": "90"})).json()
+
+    assert body["archived"] == 1
+    assert client.app[STORE_KEY].get_memory(old)["archived"] is True
+    assert client.app[STORE_KEY].get_memory(fresh)["archived"] is False
+
+
+async def test_an_age_policy_still_applies_when_the_count_policy_is_satisfied(client):
+    """The two policies are independent: being under the cap does not make a memory fresh."""
+    ids = [await _ingest(client, f"note number {i} about the build pipeline") for i in range(4)]
+    store = client.app[STORE_KEY]
+    store.db.execute(
+        "UPDATE memories SET created_at = '2020-01-01T00:00:00+00:00' WHERE id = ?", (ids[0],)
+    )
+    store.db.commit()
+
+    body = await (
+        await client.post("/prune", params={"older_than_days": "90", "keep": "4"})
+    ).json()
+
+    assert body["archived"] == 1, "keep=4 evicts nothing; the age policy still retires the stale one"
+    assert store.get_memory(ids[0])["archived"] is True

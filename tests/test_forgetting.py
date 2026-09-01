@@ -6,7 +6,14 @@ is attributed to MemoryBank's composite of decay and access frequency rather tha
 presented as settled science, and nothing is destroyed automatically.
 """
 
+import asyncio
+from datetime import datetime, timedelta, timezone
+
+from aiohttp import web
+
+from jnaapakam.cli import _background_loops
 from jnaapakam.retention import retention_score
+from jnaapakam.server import STORE_KEY
 
 
 def _ingest(store, text, namespace="", **kw):
@@ -156,3 +163,104 @@ def test_a_superseded_memory_is_archived_before_a_live_one(store):
 
     assert store.get_memory(old)["archived"] is True
     assert store.get_memory(new)["archived"] is False
+
+
+# ---- expiry ------------------------------------------------------------
+
+
+def _backdate(store, memory_id, days):
+    """Move a memory's clock back, the way real elapsed time would."""
+    when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    store.db.execute(
+        "UPDATE memories SET created_at = ?, valid_from = ? WHERE id = ?", (when, when, memory_id)
+    )
+    store.db.commit()
+
+
+def test_a_memory_untouched_for_longer_than_the_policy_is_archived(store):
+    stale = _ingest(store, "the standup link for a project that ended", importance=0.9)
+    _backdate(store, stale, days=120)
+
+    store.expire(max_age_days=90)
+
+    assert store.get_memory(stale)["archived"] is True
+
+
+def test_a_memory_inside_the_policy_window_survives(store):
+    recent = _ingest(store, "the deploy key rotates on the first of the month")
+    _backdate(store, recent, days=30)
+
+    store.expire(max_age_days=90)
+
+    assert store.get_memory(recent)["archived"] is False
+
+
+def test_recall_resets_the_expiry_clock(store):
+    """Use is the signal that matters: a memory still being read is not stale."""
+    used = _ingest(store, "the postgres connection string lives in vault")
+    _backdate(store, used, days=200)
+    store.search("postgres connection string")
+
+    store.expire(max_age_days=90)
+
+    assert store.get_memory(used)["archived"] is False
+
+
+def test_expiry_archives_rather_than_deletes(store):
+    old = _ingest(store, "a note from another era")
+    _backdate(store, old, days=365)
+
+    store.expire(max_age_days=90)
+
+    assert store.stats()["total_memories"] == 1, "expiry must not destroy anything"
+    assert store.get_memory(old)["raw_text"] == "a note from another era"
+
+
+def test_expiry_is_scoped_to_a_namespace(store):
+    other = _ingest(store, "an ancient note in another project", namespace="other")
+    target = _ingest(store, "an ancient note in this project", namespace="target")
+    _backdate(store, other, days=365)
+    _backdate(store, target, days=365)
+
+    store.expire(max_age_days=90, namespace="target")
+
+    assert store.get_memory(target)["archived"] is True
+    assert store.get_memory(other)["archived"] is False
+
+
+def test_expiry_reports_what_it_archived_and_what_remains(store):
+    old = _ingest(store, "one for the archive")
+    _ingest(store, "one that stays")
+    _backdate(store, old, days=365)
+
+    assert store.expire(max_age_days=90) == {"status": "pruned", "archived": 1, "kept": 1}
+
+
+# ---- the policy applies without anyone calling the endpoint ------------
+
+
+async def test_a_configured_expiry_policy_runs_on_its_own(config, store):
+    """A documented flag whose loop is never scheduled looks exactly like a working one.
+
+    That regression has shipped here before (--watch and --consolidate-every were
+    inert for a release), so this drives the serve-time wiring, not `expire` directly.
+    """
+    config.expire_after_days = 90
+    config.consolidate_every_minutes = 0
+    app = web.Application()
+    app[STORE_KEY] = store
+    stale = _ingest(store, "a note from a project that wound up")
+    _backdate(store, stale, days=365)
+
+    tasks = [asyncio.create_task(loop) for loop in _background_loops(config, app)]
+    try:
+        for _ in range(200):
+            if store.get_memory(stale)["archived"]:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert store.get_memory(stale)["archived"] is True

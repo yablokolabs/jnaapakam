@@ -13,7 +13,7 @@ import logging
 import re
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import lineage, retention, retrieval
 
@@ -758,6 +758,36 @@ class Store:
         )
         self.db.commit()
         return {"status": "pruned", "archived": len(doomed), "kept": keep}
+
+    @_synchronized
+    def expire(self, max_age_days: float, namespace: str = "") -> dict:
+        """Archive memories neither created nor recalled within `max_age_days`.
+
+        A count cap (`prune`) and an age policy answer different questions: one bounds
+        how much a namespace holds, the other retires what has stopped being used. A
+        namespace under its cap can still be full of memories nobody has read in a year.
+
+        The clock is `last_accessed` falling back to `created_at`, the same reference
+        `retention_score` uses — recall refreshes a memory, so use, not importance,
+        is what keeps it alive. Importance is assigned once at ingest and never
+        revised, so it cannot mark a memory that stopped mattering.
+
+        Nothing is deleted: expiry is archival and `/archive` restores it.
+        """
+        if max_age_days <= 0:
+            raise ValueError("max_age_days must be positive")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        cursor = self.db.execute(
+            "UPDATE memories SET archived = 1 WHERE namespace = ? AND archived = 0 "
+            "AND COALESCE(last_accessed, created_at) < ?",
+            (namespace or "", cutoff),
+        )
+        self.db.commit()
+        kept = self.db.execute(
+            "SELECT COUNT(*) AS n FROM memories WHERE namespace = ? AND archived = 0",
+            (namespace or "",),
+        ).fetchone()["n"]
+        return {"status": "pruned", "archived": cursor.rowcount, "kept": kept}
 
     # ---- generational continuity ---------------------------------------
     #

@@ -435,11 +435,29 @@ def build_app(config: Config, chat) -> web.Application:
         return web.json_response(result, status=status)
 
     async def handle_prune(request):
-        if not request.query.get("keep"):
-            raise web.HTTPBadRequest(reason="missing 'keep' parameter")
-        keep = _positive_int(request.query.get("keep"), "keep", 1000, maximum=1_000_000)
+        """Apply a retention policy: an age limit, a count cap, or both.
+
+        Both are additive and independent — a namespace under its cap can still hold
+        memories nobody has read in a year — so when both are given the age policy
+        runs first and the counts are summed.
+        """
+        keep_param = request.query.get("keep")
+        age_param = request.query.get("older_than_days")
+        if not keep_param and not age_param:
+            raise web.HTTPBadRequest(reason="missing 'keep' or 'older_than_days' parameter")
         namespace = request.query.get("namespace") or ""
-        return web.json_response(await in_thread(store.prune, keep, namespace))
+
+        archived = 0
+        result = None
+        if age_param:
+            days = _positive_int(age_param, "older_than_days", 90, maximum=100_000)
+            result = await in_thread(store.expire, days, namespace)
+            archived += result["archived"]
+        if keep_param:
+            keep = _positive_int(keep_param, "keep", 1000, maximum=1_000_000)
+            result = await in_thread(store.prune, keep, namespace)
+            archived += result["archived"]
+        return web.json_response(result | {"archived": archived})
 
     async def handle_archive(request):
         body = await _json_body(request)

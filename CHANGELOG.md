@@ -3,6 +3,26 @@
 All notable changes to jñāpakaṁ are recorded here. The protocol specification is
 [PROTOCOL.md](PROTOCOL.md); this file tracks the reference implementation.
 
+## [Unreleased]
+
+### Added
+
+- **Age-based retention policy.** `POST /prune` accepts `older_than_days` alongside
+  `keep`, and `Store.expire()` archives memories neither created nor recalled within
+  the window. The two policies answer different questions — `keep` bounds how much a
+  namespace holds, `older_than_days` retires what stopped being used — so a namespace
+  under its cap can still be full of memories nobody has read in a year. Both may be
+  given; the age policy runs first.
+- **Scheduled expiry.** `MEMORY_EXPIRE_AFTER_DAYS` / `--expire-after` applies the age
+  policy hourly, starting at boot. Off unless configured.
+- Protocol §8 gains the age policy, its recall-resets-the-clock rule, and a MAY for
+  applying it on a schedule.
+
+The age clock is `last_accessed` falling back to `created_at`, so recall keeps a
+memory alive regardless of age. Importance deliberately does not: it is assigned once
+at ingest and never revised, so it cannot notice that a memory stopped mattering.
+Expiry archives and never deletes, so `/archive` with `restore` undoes it.
+
 ## [0.4.1] — 2026-09-01
 
 Three fixes to the self-hosted / OpenAI-compatible path (`LLM_BASE_URL`), which

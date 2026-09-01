@@ -115,9 +115,43 @@ async def _consolidation_loop(interval_minutes: int, consolidate) -> None:
             log.error("Consolidation error: %s", exc)
 
 
+async def _expiry_loop(days: int, store, sweep_every_minutes: int = 60) -> None:
+    """Apply the age policy on a timer, starting immediately.
+
+    # ponytail: fixed hourly sweep. The policy is measured in days, so the sweep
+    # cadence only bounds how late a memory is retired; make it a knob if anyone
+    # needs finer granularity than that.
+    """
+    log.info("Expiry: archiving memories untouched for %s days", days)
+    while True:
+        try:
+            result = await asyncio.to_thread(store.expire, days)
+            if result["archived"]:
+                log.info("Expiry: archived %s memories", result["archived"])
+        except Exception as exc:
+            log.error("Expiry error: %s", exc)
+        await asyncio.sleep(sweep_every_minutes * 60)
+
+
+def _background_loops(config: Config, app) -> list:
+    """Every loop the configuration asks for, as coroutines ready to schedule.
+
+    Kept in one place because the failure mode is silent: a documented flag whose
+    loop is never scheduled looks exactly like a working one.
+    """
+    store = app[STORE_KEY]
+    loops = []
+    if config.watch_dir:
+        loops.append(_watch_folder(config.watch_dir, store, app[INGEST_KEY]))
+    if config.consolidate_every_minutes > 0:
+        loops.append(_consolidation_loop(config.consolidate_every_minutes, app[CONSOLIDATE_KEY]))
+    if config.expire_after_days:
+        loops.append(_expiry_loop(config.expire_after_days, store))
+    return loops
+
+
 async def _serve(config: Config) -> None:
     app = build_app(config, chat=chat)
-    store = app[STORE_KEY]
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, config.host, config.port)
@@ -128,20 +162,12 @@ async def _serve(config: Config) -> None:
     log.info("  model:    %s", config.model)
     log.info("  database: %s", config.db_path)
     log.info("  auth:     %s", "required" if config.auth_required else "disabled (loopback only)")
+    if config.expire_after_days:
+        log.info("  expiry:   after %s days without use", config.expire_after_days)
 
     # Previously neither loop was ever scheduled, so --watch and --consolidate-every
     # were silently inert despite being documented and logged.
-    background = []
-    if config.watch_dir:
-        background.append(
-            asyncio.create_task(_watch_folder(config.watch_dir, store, app[INGEST_KEY]))
-        )
-    if config.consolidate_every_minutes > 0:
-        background.append(
-            asyncio.create_task(
-                _consolidation_loop(config.consolidate_every_minutes, app[CONSOLIDATE_KEY])
-            )
-        )
+    background = [asyncio.create_task(loop) for loop in _background_loops(config, app)]
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -170,6 +196,7 @@ def _serve_command(args) -> int:
             port=args.port,
             model=args.model,
             consolidate_every_minutes=args.consolidate_every,
+            expire_after_days=args.expire_after,
             watch_dir=args.watch,
         ).validate()
     except ConfigError as exc:
@@ -475,6 +502,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--consolidate-every", type=int, default=None, dest="consolidate_every",
         help="Minutes between consolidation cycles",
+    )
+    serve.add_argument(
+        "--expire-after", type=int, default=None, dest="expire_after",
+        help="Archive memories untouched for this many days (off unless set)",
     )
     serve.set_defaults(func=_serve_command)
 

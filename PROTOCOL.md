@@ -379,11 +379,22 @@ Returns `409` with `{"status": "disabled"}` when no judge model is configured.
 
 #### POST /prune
 
-Archive the lowest-retention memories in a namespace.
+Apply a retention policy to a namespace. Two are defined and they are independent:
+`keep` caps how many memories a namespace holds, `older_than_days` retires the ones
+that have stopped being used.
 
-**Parameters:** `keep` (required), `namespace` (optional)
+**Parameters:** `keep` (count cap), `older_than_days` (age limit), `namespace`
+(optional). At least one policy MUST be given; a request naming neither MUST be
+rejected rather than defaulted.
 
-**Response:** `{"status": "pruned", "archived": N, "kept": N}`
+**Response:** `{"status": "pruned", "archived": N, "kept": N}`, where `archived`
+counts every memory retired by the request.
+
+**Rules:**
+- The age clock is `last_accessed`, falling back to `created_at`. Recall therefore
+  refreshes a memory, and a memory still being read MUST NOT expire on age alone.
+- When both policies are given, the age policy is applied first, and `archived`
+  reports the total across both.
 
 #### POST /archive
 
@@ -396,6 +407,9 @@ Archive or restore a single memory.
 - Archived memories MUST be excluded from retrieval by default and reachable when explicitly requested.
 - Retention scoring SHOULD combine importance, access frequency, and temporal decay. Frequency is the outcome-grounded term; `importance` is assigned once and never revised.
 - Superseded memories SHOULD be evicted before live ones.
+- An age policy MAY be applied on a schedule rather than only on request. It MUST be
+  off unless configured: retiring memories on a timer the operator never asked for is
+  indistinguishable, from inside the agent, from losing them.
 
 #### POST /clear
 

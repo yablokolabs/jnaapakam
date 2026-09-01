@@ -288,9 +288,9 @@ Three standard files that any agent framework can read.
 | `/clear` | POST | Delete all memories (`?namespace=...` to scope the reset) |
 | `/supersede` | POST | Correct a memory `{"old_id": N, "new_id": M}` — invalidates, never deletes |
 | `/reconcile` | POST | Detect and resolve contradictions (requires a judge model) |
-| `/prune` | POST | Archive all but the `?keep=N` highest-retention memories |
+| `/prune` | POST | Apply a retention policy: `?keep=N` (count cap), `?older_than_days=N` (age), or both |
 | `/archive` | POST | Archive or restore one memory `{"memory_id": N, "restore": bool}` |
-| `/prune` requires `?keep=N` | | omitting it is a `400`, not a silent default |
+| `/prune` requires one policy | | omitting both `keep` and `older_than_days` is a `400`, not a silent default |
 | `/namespaces` | GET | List namespaces with memory counts |
 | `/backup` | GET | Export memories and consolidations as JSON |
 | `/restore` | POST | Import from backup JSON |
@@ -336,6 +336,7 @@ own lineage; it cannot rewrite it.
 | `MEMORY_DB` | *(package dir)* `memory.db` | SQLite database path |
 | `MEMORY_WATCH` | *(unset)* | Folder to auto-ingest text files from |
 | `CONSOLIDATE_INTERVAL` | `30` | Minutes between consolidation cycles |
+| `MEMORY_EXPIRE_AFTER_DAYS` | *(unset)* | Archive memories untouched for this many days. Unset means nothing expires |
 
 ### CLI
 
@@ -348,6 +349,7 @@ jnaapakam serve [options]
   --model MODEL            LLM model alias or full name
   --watch DIR              Folder to watch for file ingestion
   --consolidate-every MIN  Consolidation interval (default: 30)
+  --expire-after DAYS      Archive memories untouched for this long (default: off)
 
 jnaapakam init [directory]   Create SOUL.md / IDENTITY.md / MEMORY.md
 
@@ -492,9 +494,24 @@ Forgetting is soft. Memories are **archived, never deleted**:
 
 ```bash
 curl -X POST "http://localhost:8889/prune?keep=500&namespace=project-a"
+curl -X POST "http://localhost:8889/prune?older_than_days=180&namespace=project-a"
 curl "http://localhost:8889/search?q=...&include_archived=true"   # still reachable
 curl -X POST http://localhost:8889/archive -d '{"memory_id": 7, "restore": true}'
 ```
+
+Two policies, because they answer different questions. `keep` bounds how much a
+namespace holds; `older_than_days` retires what has stopped being used. A namespace
+comfortably under its cap can still be full of memories nobody has read in a year.
+Give both and the age policy runs first.
+
+The age clock is `last_accessed`, falling back to `created_at` — so **recall resets
+it**, and a memory still being read never expires no matter how old it is. Use is the
+signal, not importance: `importance` is assigned once at ingest and never revised, so
+it cannot notice that a memory stopped mattering.
+
+Set `MEMORY_EXPIRE_AFTER_DAYS` (or `--expire-after`) and the policy applies on its own,
+swept hourly, starting at boot. Unset, nothing expires — archiving an operator's
+memories on a timer they never asked for is not a sensible default.
 
 Retention combines importance, **how often the memory was actually recalled**, and
 temporal decay. The frequency term matters most: `importance` is assigned once by an
@@ -729,10 +746,10 @@ CMD ["jnaapakam", "serve"]
 - [x] Automatic contradiction detection driving supersession
 - [x] Soft forgetting: retention scoring, archive and prune
 - [x] Generational continuity: stable `agent_id`, lineage, migration provenance, integrity
+- [x] Memory expiry and retention policies: age-based, scheduled, still reversible
 - [ ] Optional embeddings as a runtime-detected capability
 - [ ] Pluggable storage backends (Postgres/pgvector, embedded graph)
 - [ ] Encryption at rest
-- [ ] Memory expiry and retention policies
 - [ ] Dashboard UI
 - [ ] Signed continuity records (v0.3 provides integrity, not authenticity)
 
