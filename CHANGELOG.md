@@ -33,6 +33,12 @@ All notable changes to jñāpakaṁ are recorded here. The protocol specificatio
   statement must bind the agent, generation and artifact — signing the digest alone
   leaves a signature that can be lifted onto another generation's seal.
 
+- **Operator dashboard** at `GET /dashboard`: counts, namespace filter, recent
+  memories and search, as one dependency-free HTML file with no build step. Served
+  on local binds only — on a public bind it is a 404 even with a valid token,
+  because exposing the API should not also publish a browsable window onto the
+  agent's memory. It reads only documented endpoints and never writes.
+
 ### Changed
 
 - Schema version 5: `generation_artifacts` gains `signature` and `public_key`.

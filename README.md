@@ -293,6 +293,7 @@ Three standard files that any agent framework can read.
 | `/archive` | POST | Archive or restore one memory `{"memory_id": N, "restore": bool}` |
 | `/prune` requires one policy | | omitting both `keep` and `older_than_days` is a `400`, not a silent default |
 | `/namespaces` | GET | List namespaces with memory counts |
+| `/dashboard` | GET | Read-only operator view in a browser. Local binds only |
 | `/backup` | GET | Export memories and consolidations as JSON |
 | `/restore` | POST | Import from backup JSON |
 | `/mcp` | POST | MCP JSON-RPC endpoint (also served on `/`) |
@@ -489,6 +490,23 @@ Four guardrails, each because the failure mode is real:
 Reconciliation never runs on the ingest path, so a slow or failing judge cannot
 block a write. Tune with `reconcile_min_confidence`, `reconcile_min_overlap`, and
 `reconcile_max_comparisons`.
+
+## Dashboard
+
+```bash
+jnaapakam serve
+open http://localhost:8889/dashboard
+```
+
+A read-only view of what the agent remembers: counts, namespaces, recent memories,
+and search. One HTML file with no build step and no dependencies, served by the same
+process — archived memories are dimmed, superseded ones marked, and nothing on the
+page can write.
+
+It is served on **local binds only**. On a public bind it is a 404 even with a valid
+token: exposing the API to a network should not also publish a browsable window onto
+an agent's memory. When a token is configured, the dashboard needs it like every
+other route.
 
 ## Forgetting
 
@@ -793,10 +811,10 @@ CMD ["jnaapakam", "serve"]
 - [x] Generational continuity: stable `agent_id`, lineage, migration provenance, integrity
 - [x] Memory expiry and retention policies: age-based, scheduled, still reversible
 - [x] Signed continuity records: Ed25519 seals, optional dependency, provenance on request
+- [x] Dashboard UI: read-only, local binds only, no build step
 - [ ] Optional embeddings as a runtime-detected capability
 - [ ] Pluggable storage backends (Postgres/pgvector, embedded graph)
 - [ ] Encryption at rest
-- [ ] Dashboard UI
 
 ## Philosophy
 

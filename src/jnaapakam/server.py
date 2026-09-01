@@ -10,6 +10,7 @@ import asyncio
 import hmac
 import json
 import logging
+from pathlib import Path
 
 from aiohttp import web
 
@@ -60,6 +61,8 @@ NAMESPACE_PARAM = {
 
 CONFIG_KEY: web.AppKey[Config] = web.AppKey("config", Config)
 STORE_KEY: web.AppKey[Store] = web.AppKey("store", Store)
+
+DASHBOARD = Path(__file__).with_name("dashboard.html")
 
 # Routes that probes, discovery clients, and the MCP bridge can hit without
 # credentials. They expose no destructive operations: / is server metadata,
@@ -357,6 +360,23 @@ def build_app(config: Config, chat) -> web.Application:
     async def handle_health(request):
         """Liveness for platform startup probes: reachable without credentials."""
         return web.json_response({"status": "ok", "name": "jnaapakam", "version": "0.4.0"})
+
+    async def handle_dashboard(request):
+        """A read-only operator view, served only where the server is already local.
+
+        On a public bind it is a 404 rather than a 401: a browsable window onto an
+        agent's memory is not something exposing the API should also publish, and a
+        login page on the open internet invites the guessing it would then have to
+        survive.
+        """
+        if config.binds_publicly:
+            raise web.HTTPNotFound(reason="the dashboard is served on local binds only")
+        return web.Response(
+            body=DASHBOARD.read_bytes(),
+            content_type="text/html",
+            charset="utf-8",
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def handle_status(request):
         namespace = request.query.get("namespace")
@@ -805,6 +825,7 @@ def build_app(config: Config, chat) -> web.Application:
     app.router.add_post("/clear", handle_clear)
     app.router.add_post("/supersede", handle_supersede)
     app.router.add_post("/reconcile", handle_reconcile)
+    app.router.add_get("/dashboard", handle_dashboard)
     app.router.add_post("/prune", handle_prune)
     app.router.add_post("/archive", handle_archive)
     app.router.add_post("/restore", handle_restore)

@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>jñāpakaṁ</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfaf8; --panel: #fff; --ink: #17150f; --muted: #6b6558;
+    --line: #e5e0d6; --accent: #8a6d3b; --warn: #9a3b2f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14130f; --panel: #1c1a16; --ink: #ece7dc; --muted: #98907f;
+      --line: #2c2924; --accent: #c9a35f; --warn: #d98679;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 22px 24px 16px; border-bottom: 1px solid var(--line);
+    display: flex; flex-wrap: wrap; gap: 16px; align-items: baseline;
+  }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .01em; }
+  .agent { color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { max-width: 1080px; margin: 0 auto; padding: 22px 24px 64px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+  }
+  .stat b { display: block; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  form { display: flex; gap: 8px; margin: 26px 0 14px; flex-wrap: wrap; }
+  input, select, button {
+    font: inherit; color: inherit; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px;
+  }
+  input[type=search] { flex: 1 1 260px; }
+  button { cursor: pointer; border-color: var(--accent); color: var(--accent); }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  li {
+    background: var(--panel); border: 1px solid var(--line); border-left-width: 3px;
+    border-radius: 8px; padding: 12px 14px;
+  }
+  li.archived { border-left-color: var(--muted); opacity: .72; }
+  li.superseded { border-left-color: var(--warn); }
+  .summary { margin: 0 0 6px; }
+  .meta {
+    color: var(--muted); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: flex; flex-wrap: wrap; gap: 10px;
+  }
+  .tag { color: var(--accent); }
+  .empty, .error { color: var(--muted); padding: 18px 0; }
+  .error { color: var(--warn); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted);
+       margin: 30px 0 10px; font-weight: 600; }
+</style>
+
+<header>
+  <h1>jñāpakaṁ</h1>
+  <div class="agent" id="agent">reading identity…</div>
+</header>
+
+<main>
+  <div class="stats" id="stats"></div>
+
+  <form id="search">
+    <input type="search" id="q" placeholder="Search memories…" autocomplete="off">
+    <select id="namespace"><option value="">all namespaces</option></select>
+    <label><input type="checkbox" id="archived"> include archived</label>
+    <button type="submit">Search</button>
+  </form>
+
+  <h2 id="listing">Recent memories</h2>
+  <ul id="results"></ul>
+</main>
+
+<script>
+  // Every request below is a documented read endpoint. The dashboard has no private
+  // API of its own, and it never writes: an operator's window must not be a way to
+  // change what the agent remembers by accident.
+  const $ = (id) => document.getElementById(id);
+  const text = (value) => String(value ?? "");
+
+  async function read(path, params) {
+    const url = new URL(path, location.href);
+    for (const [key, value] of Object.entries(params || {})) {
+      if (value !== "" && value !== false && value != null) url.searchParams.set(key, value);
+    }
+    const resp = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!resp.ok) throw new Error(`${path} returned ${resp.status}`);
+    return resp.json();
+  }
+
+  function card(memory) {
+    const li = document.createElement("li");
+    if (memory.archived) li.classList.add("archived");
+    if (memory.superseded_by) li.classList.add("superseded");
+
+    const summary = document.createElement("p");
+    summary.className = "summary";
+    summary.textContent = text(memory.summary || memory.raw_text);
+    li.append(summary);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const bits = [`#${memory.id}`, text(memory.created_at).slice(0, 10)];
+    if (memory.namespace) bits.push(memory.namespace);
+    if (memory.source) bits.push(memory.source);
+    if (typeof memory.score === "number") bits.push(`score ${memory.score.toFixed(3)}`);
+    if (memory.archived) bits.push("archived");
+    if (memory.superseded_by) bits.push(`superseded by #${memory.superseded_by}`);
+    for (const bit of bits) {
+      const span = document.createElement("span");
+      span.textContent = bit;
+      meta.append(span);
+    }
+    for (const topic of memory.topics || []) {
+      const span = document.createElement("span");
+      span.className = "tag";
+      span.textContent = `#${topic}`;
+      meta.append(span);
+    }
+    li.append(meta);
+    return li;
+  }
+
+  function render(memories, emptyMessage) {
+    const list = $("results");
+    list.replaceChildren();
+    if (!memories.length) {
+      const empty = document.createElement("li");
+      empty.className = "empty";
+      empty.textContent = emptyMessage;
+      list.append(empty);
+      return;
+    }
+    list.append(...memories.map(card));
+  }
+
+  function fail(error) {
+    const list = $("results");
+    list.replaceChildren();
+    const item = document.createElement("li");
+    item.className = "error";
+    item.textContent = error.message;
+    list.append(item);
+  }
+
+  function stat(label, value) {
+    const box = document.createElement("div");
+    box.className = "stat";
+    const number = document.createElement("b");
+    number.textContent = value;
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    box.append(number, caption);
+    return box;
+  }
+
+  async function loadHeader() {
+    const [status, agent, namespaces] = await Promise.all([
+      read("/status"),
+      read("/agent"),
+      read("/namespaces"),
+    ]);
+
+    $("stats").replaceChildren(
+      stat("memories", status.total_memories),
+      stat("archived", status.archived),
+      stat("superseded", status.superseded),
+      stat("consolidations", status.consolidations),
+    );
+
+    // current_generation is null until a generation is recorded, which is the
+    // normal state for a store nobody has migrated yet — say so rather than
+    // rendering a gap.
+    const generation = agent.current_generation;
+    $("agent").textContent = generation
+      ? `${agent.agent_id} · generation ${generation.id}${generation.label ? ` ${generation.label}` : ""}`
+      : `${agent.agent_id} · no generation recorded`;
+
+    const select = $("namespace");
+    for (const entry of namespaces.namespaces) {
+      const option = document.createElement("option");
+      option.value = entry.namespace;
+      option.textContent = `${entry.namespace || "(default)"} · ${entry.total_memories}`;
+      select.append(option);
+    }
+  }
+
+  async function loadRecent() {
+    // /memories has no archived filter — it lists everything — so the checkbox is
+    // honoured here rather than passed as a parameter the endpoint would ignore.
+    const body = await read("/memories", { limit: 40, namespace: $("namespace").value });
+    const memories = $("archived").checked
+      ? body.memories
+      : body.memories.filter((memory) => !memory.archived);
+    $("listing").textContent = "Recent memories";
+    render(memories, "Nothing stored yet.");
+  }
+
+  async function runSearch(event) {
+    event.preventDefault();
+    const query = $("q").value.trim();
+    if (!query) return loadRecent().catch(fail);
+    const params = { q: query, limit: 40, namespace: $("namespace").value };
+    if ($("archived").checked) params.include_archived = "true";
+    try {
+      const body = await read("/search", params);
+      $("listing").textContent = `Results for “${query}”`;
+      render(body.memories || [], "No memory matched.");
+    } catch (error) {
+      fail(error);
+    }
+  }
+
+  $("search").addEventListener("submit", runSearch);
+  $("namespace").addEventListener("change", () => runSearch(new Event("submit")));
+  $("archived").addEventListener("change", () => runSearch(new Event("submit")));
+
+  loadHeader().catch(fail);
+  loadRecent().catch(fail);
+</script>
