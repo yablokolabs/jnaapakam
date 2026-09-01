@@ -17,6 +17,26 @@ All notable changes to jñāpakaṁ are recorded here. The protocol specificatio
   policy hourly, starting at boot. Off unless configured.
 - Protocol §8 gains the age policy, its recall-resets-the-clock rule, and a MAY for
   applying it on a schedule.
+- **Signed continuity records.** A seal can now be signed with an Ed25519 key
+  (`MEMORY_SIGNING_KEY`), and validation gains an eighth check, `signature`. The
+  digests of v0.4 give a seal integrity; they cannot give it authenticity, because
+  whoever can write the store can recompute them. A signature is what separates a
+  corpus that survived from one that was replaced and resealed.
+- Signing is an optional extra: `pip install jnaapakam[signing]`. The base install
+  stays at one dependency, an unsigned seal does not fail validation, and a seal
+  that cannot be verified reports `skipped` — unverifiable is not verified.
+- `--public-key` on `generation validate` (and `public_key` on
+  `POST /generations/validate`) checks provenance rather than self-consistency:
+  verifying against the key recorded beside the signature only proves an impostor
+  was internally consistent.
+- Protocol §10.7 defines seal signatures, including the rule that the signed
+  statement must bind the agent, generation and artifact — signing the digest alone
+  leaves a signature that can be lifted onto another generation's seal.
+
+### Changed
+
+- Schema version 5: `generation_artifacts` gains `signature` and `public_key`.
+  Additive — seals written before signing existed read back as unsigned.
 
 The age clock is `last_accessed` falling back to `created_at`, so recall keeps a
 memory alive regardless of age. Importance deliberately does not: it is assigned once

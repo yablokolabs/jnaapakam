@@ -478,3 +478,29 @@ async def test_generation_metadata_never_reaches_a_synthesised_answer(client):
 
     assert "IGNORE PRIOR INSTRUCTIONS" not in body["answer"]
     assert (await (await client.get("/status")).json())["total_memories"] == 1
+
+
+async def test_validation_reports_the_signature_check_over_http(client):
+    """An unsigned deployment must say so, not report a signature it never checked."""
+    gen1 = await _create(client, manifest=GEN1)
+
+    body = await (
+        await client.post("/generations/validate", json={"generation": gen1["id"]})
+    ).json()
+
+    assert body["checks"]["signature"]["status"] == "skipped"
+
+
+async def test_an_expected_public_key_is_honoured_over_http(client):
+    """A caller can demand provenance; an unsigned seal cannot satisfy it silently."""
+    gen1 = await _create(client, manifest=GEN1)
+
+    body = await (
+        await client.post(
+            "/generations/validate",
+            json={"generation": gen1["id"], "public_key": "ab" * 32},
+        )
+    ).json()
+
+    assert body["checks"]["signature"]["status"] == "skipped"
+    assert body["passed"] is True, "an unsigned seal is unverified, not invalid"

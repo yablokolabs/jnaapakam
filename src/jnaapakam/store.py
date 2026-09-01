@@ -15,13 +15,13 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
-from . import lineage, retention, retrieval
+from . import lineage, retention, retrieval, signing
 
 log = logging.getLogger("jnaapakam.store")
 
 # Bumped when the on-disk layout changes. Tracked in `PRAGMA user_version` so an
 # upgrade runs exactly once per database. v0.1 files report 0.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 PROTOCOL_VERSION = "0.4"
 
@@ -71,6 +71,13 @@ ADDED_COLUMNS = {
     "access_count": "INTEGER NOT NULL DEFAULT 0",
     "last_accessed": "TEXT",
     "archived": "INTEGER NOT NULL DEFAULT 0",
+}
+
+# Signatures are additive: a store written before signing existed keeps its seals,
+# and they verify as unsigned rather than as failures.
+ADDED_ARTIFACT_COLUMNS = {
+    "signature": "TEXT",
+    "public_key": "TEXT",
 }
 
 INDEXES = """
@@ -129,6 +136,8 @@ CREATE TABLE IF NOT EXISTS generation_artifacts (
     bytes INTEGER,
     records INTEGER,
     recorded_at TEXT NOT NULL,
+    signature TEXT,
+    public_key TEXT,
     PRIMARY KEY (generation_id, name)
 );
 
@@ -215,9 +224,16 @@ def _synchronized(method):
 
 
 class Store:
-    def __init__(self, db_path: str, max_query_terms: int = MAX_QUERY_TERMS):
+    def __init__(
+        self,
+        db_path: str,
+        max_query_terms: int = MAX_QUERY_TERMS,
+        signing_key: str | None = None,
+    ):
         self.db_path = db_path
         self.max_query_terms = max_query_terms
+        # A path, not key material: the key is read per seal and not kept resident.
+        self.signing_key = signing_key
         self._db: sqlite3.Connection | None = None
         # The server runs store calls on a thread-pool worker, so the connection is
         # shared across threads and every statement is serialised by this lock.
@@ -264,6 +280,7 @@ class Store:
                     _statements(INDEXES) + _statements(FTS_SCHEMA) + _statements(GENERATION_SCHEMA)
                 ):
                     self.db.execute(statement)
+                self._add_missing_artifact_columns()
                 # Gated on 3, not on SCHEMA_VERSION: the index is only missing in
                 # files written before v0.2, and rebuilding it on every future
                 # schema bump would cost every user a full reindex for nothing.
@@ -288,6 +305,15 @@ class Store:
                 self.db.execute(f"ALTER TABLE memories ADD COLUMN {column} {definition}")
         # Rows that predate the validity columns are treated as valid since creation.
         self.db.execute("UPDATE memories SET valid_from = created_at WHERE valid_from IS NULL")
+
+    def _add_missing_artifact_columns(self) -> None:
+        existing = {row["name"] for row in self.db.execute("PRAGMA table_info(generation_artifacts)")}
+        for column, definition in ADDED_ARTIFACT_COLUMNS.items():
+            if column not in existing:
+                log.info("Upgrading schema: adding generation_artifacts.%s", column)
+                self.db.execute(
+                    f"ALTER TABLE generation_artifacts ADD COLUMN {column} {definition}"
+                )
 
     def _backfill_full_text_index(self) -> None:
         """Index rows written before the full-text table existed.
@@ -994,6 +1020,36 @@ class Store:
             raise
         return self.get_generation(generation_id)
 
+    def _write_artifact(self, generation_id: int, artifact: dict) -> None:
+        """Record one artifact digest, signed when a signing key is configured.
+
+        Signing failures are not swallowed: a seal that silently records itself
+        unsigned would look, later, exactly like a seal made before signing was
+        turned on.
+        """
+        row = {
+            "name": artifact["name"],
+            "algorithm": artifact.get("algorithm") or "sha256",
+            "digest": artifact["digest"],
+            "bytes": artifact.get("bytes"),
+            "records": artifact.get("records"),
+            "recorded_at": artifact["recorded_at"],
+        }
+        signed = {"signature": None, "public_key": None}
+        if self.signing_key:
+            statement = lineage.artifact_statement(self._meta("agent_id"), generation_id, row)
+            result = signing.sign(statement, self.signing_key)
+            signed = {"signature": result["signature"], "public_key": result["public_key"]}
+        self.db.execute(
+            "INSERT OR REPLACE INTO generation_artifacts (generation_id, name, algorithm, "
+            "digest, bytes, records, recorded_at, signature, public_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                generation_id, row["name"], row["algorithm"], row["digest"], row["bytes"],
+                row["records"], row["recorded_at"], signed["signature"], signed["public_key"],
+            ),
+        )
+
     @_synchronized
     def record_artifacts(self, generation_id, artifacts) -> dict:
         """Record digests a caller computed. The server never reads the files itself.
@@ -1010,12 +1066,7 @@ class Store:
         now = _now()
         try:
             for artifact in checked:
-                self.db.execute(
-                    "INSERT OR REPLACE INTO generation_artifacts (generation_id, name, algorithm, "
-                    "digest, bytes, records, recorded_at) VALUES (?, ?, ?, ?, ?, NULL, ?)",
-                    (generation_id, artifact["name"], artifact["algorithm"], artifact["digest"],
-                     artifact["bytes"], now),
-                )
+                self._write_artifact(generation_id, artifact | {"recorded_at": now})
             self.db.commit()
         except BaseException:
             self.db.rollback()
@@ -1033,10 +1084,10 @@ class Store:
             (lineage.CORPUS_ARTIFACT, digests["content"]),
             (lineage.STATE_ARTIFACT, digests["state"]),
         ):
-            self.db.execute(
-                "INSERT OR REPLACE INTO generation_artifacts (generation_id, name, algorithm, "
-                "digest, bytes, records, recorded_at) VALUES (?, ?, 'sha256', ?, NULL, ?, ?)",
-                (generation_id, name, digest, records, now),
+            self._write_artifact(
+                generation_id,
+                {"name": name, "algorithm": "sha256", "digest": digest, "bytes": None,
+                 "records": records, "recorded_at": now},
             )
         self.db.commit()
         return {
@@ -1111,6 +1162,62 @@ class Store:
                 else "semantic state no longer matches the sealed state"
             ),
         }
+
+    def _check_signature(self, generation: dict, recorded: dict, expected_key) -> dict:
+        """Was this seal made by the key it claims, and by the key you expected?
+
+        Integrity and authenticity are different properties. The digests catch a
+        corpus that drifted; they cannot catch a corpus that was replaced and
+        resealed, because whoever can write the store can recompute them. Only a
+        signature over a statement they cannot forge distinguishes the two.
+
+        Verifying against the public key recorded beside the signature proves
+        internal consistency and nothing more — an impostor records their own key.
+        Pass `expected_key` to check provenance rather than self-consistency.
+        """
+        signed = [a for a in recorded.values() if a.get("signature")]
+        if not signed:
+            return {"status": "skipped", "detail": "no artifact in this seal is signed"}
+        if not signing.available():
+            return {
+                "status": "skipped",
+                "detail": f"{len(signed)} signed artifacts; " + signing.INSTALL_HINT,
+            }
+
+        keys = {a["public_key"] for a in signed}
+        if expected_key and keys != {expected_key}:
+            sealed_by = ", ".join(sorted(signing.fingerprint(k) for k in keys))
+            return {
+                "status": "fail",
+                "detail": (
+                    f"sealed by {sealed_by}, expected "
+                    f"{signing.fingerprint(expected_key)} — this seal is not from that key"
+                ),
+            }
+
+        broken = [
+            a["name"]
+            for a in signed
+            if not signing.verify(
+                lineage.artifact_statement(generation["agent_id"], generation["id"], a),
+                a["signature"],
+                a["public_key"],
+            )
+        ]
+        if broken:
+            return {
+                "status": "fail",
+                "detail": (
+                    "signature does not cover what is recorded: " + ", ".join(sorted(broken))
+                    + " — the seal was altered after it was signed, or lifted from another generation"
+                ),
+            }
+        unsigned = sorted(name for name, a in recorded.items() if not a.get("signature"))
+        by = ", ".join(sorted(signing.fingerprint(k) for k in keys))
+        detail = f"{len(signed)} artifacts signed by {by}"
+        if unsigned:
+            detail += f"; unsigned: {', '.join(unsigned)}"
+        return {"status": "pass", "detail": detail}
 
     def _check_recall(self, probes) -> dict:
         """Can this generation still reach the knowledge it inherited?
@@ -1192,7 +1299,9 @@ class Store:
         return {"status": status, "detail": str(behavioral.get("detail") or "")[:1000]}
 
     @_synchronized
-    def validate_continuity(self, generation_id, artifacts=None, probes=None, behavioral=None) -> dict:
+    def validate_continuity(
+        self, generation_id, artifacts=None, probes=None, behavioral=None, public_key=None
+    ) -> dict:
         """Check that a generation still holds the agent it claims to continue.
 
         Every check reports its own status, and one that was not requested says
@@ -1210,6 +1319,7 @@ class Store:
             "identity": self._check_identity(generation),
             "memory": self._check_memory(recorded, live),
             "semantic_state": self._check_semantic_state(recorded, live),
+            "signature": self._check_signature(generation, recorded, public_key),
             "recall": self._check_recall(probes),
             "soul": self._check_soul(recorded, artifacts),
             "context": self._check_context(generation),

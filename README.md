@@ -40,7 +40,8 @@ Some frameworks bolt on vector databases or conversation logs, but there's no st
 ### 1. Install
 
 ```bash
-pip install jnaapakam
+pip install jnaapakam                 # one dependency: aiohttp
+pip install "jnaapakam[signing]"      # + cryptography, to sign continuity seals
 ```
 
 Or from source:
@@ -299,7 +300,7 @@ Three standard files that any agent framework can read.
 | `/generations` | GET | List generations; `?id=N` adds ancestry and artifacts |
 | `/generations` | POST | Record a candidate generation `{"parent": N, "label": "...", "manifest": {...}}` |
 | `/generations/artifacts` | POST | Record digests `{"generation": N, "artifacts": [...], "seal_corpus": true}` |
-| `/generations/validate` | POST | Run the continuity checks and record the outcome |
+| `/generations/validate` | POST | Run the continuity checks and record the outcome; `public_key` demands provenance |
 | `/generations/promote` | POST | Make a generation current `{"generation": N, "force": false}` |
 | `/generations/reject` | POST | Close a candidate off `{"generation": N, "reason": "..."}` |
 | `/generations/rollback` | POST | Return to an earlier generation `{"generation": N}` |
@@ -337,6 +338,7 @@ own lineage; it cannot rewrite it.
 | `MEMORY_WATCH` | *(unset)* | Folder to auto-ingest text files from |
 | `CONSOLIDATE_INTERVAL` | `30` | Minutes between consolidation cycles |
 | `MEMORY_EXPIRE_AFTER_DAYS` | *(unset)* | Archive memories untouched for this many days. Unset means nothing expires |
+| `MEMORY_SIGNING_KEY` | *(unset)* | Path to an Ed25519 private key. Unset means seals carry integrity but not authenticity |
 
 ### CLI
 
@@ -596,7 +598,7 @@ jnaapakam generation validate 2 --soul-dir ./soul
 jnaapakam generation promote 2
 ```
 
-`validate` runs seven checks, and one that was not requested reports `skipped`
+`validate` runs eight checks, and one that was not requested reports `skipped`
 rather than `pass` — a validation that passes because nothing was checked is
 exactly the failure this exists to prevent:
 
@@ -604,6 +606,7 @@ exactly the failure this exists to prevent:
   identity       pass     agent_id urn:jnaapakam:agent:9f2c1e7a…
   memory         pass     1842 records match the sealed corpus digest
   semantic_state pass     validity, archival, corrections and links match the sealed state
+  signature      pass     2 artifacts signed by 46ce01f0611df872
   recall         pass     3 recall probes resolved
   soul           pass     3 artifacts match their recorded digests
   context        recorded 1 external references recorded; verifying them is the
@@ -615,6 +618,48 @@ generation 2: continuity verified
 Promotion is refused unless the last validation passed. `--force` exists for the
 operator who has decided anyway, and writes onto the migration record that the
 override was used — so it is never invisible afterwards.
+
+### Signing a seal
+
+The digests above give a seal **integrity**: they catch a corpus that drifted.
+They cannot give it **authenticity**. Anyone who can write the database can
+recompute every digest, so an intact continuity record proves only that nobody
+tampered carelessly. Signing is what separates a corpus that survived from one
+that was replaced and resealed.
+
+```bash
+pip install "jnaapakam[signing]"                          # Ed25519 via cryptography
+openssl genpkey -algorithm ed25519 -out sealing.key       # no extra tooling needed
+export MEMORY_SIGNING_KEY=$PWD/sealing.key
+```
+
+Every seal from then on is signed, and `validate` gains a `signature` check:
+
+```
+  signature      pass     2 artifacts signed by 46ce01f0611df872
+```
+
+The signature covers a canonical statement binding the `agent_id`, the generation,
+the artifact name, its digest and the time it was recorded — not the digest alone,
+so a valid signature cannot be lifted onto another generation's seal.
+
+Verifying against the key recorded beside the signature proves self-consistency and
+nothing more: an impostor records their own key. To check *provenance*, name the key
+you expect:
+
+```bash
+jnaapakam generation validate 2 --public-key 46ce01f0…      # hex public key
+```
+
+```
+  signature      fail     sealed by 9a2db2e23f1504cd, expected 46ce01f0611df872
+                          — this seal is not from that key
+```
+
+Signing is optional in both directions. Without a key, seals record digests as
+before. Without the dependency installed, an existing signature reports `skipped`,
+never `pass` — unverifiable is not verified. An unsigned seal is a weaker claim, not
+a failed one, so it does not fail validation.
 
 ### Comparing generations
 
@@ -747,11 +792,11 @@ CMD ["jnaapakam", "serve"]
 - [x] Soft forgetting: retention scoring, archive and prune
 - [x] Generational continuity: stable `agent_id`, lineage, migration provenance, integrity
 - [x] Memory expiry and retention policies: age-based, scheduled, still reversible
+- [x] Signed continuity records: Ed25519 seals, optional dependency, provenance on request
 - [ ] Optional embeddings as a runtime-detected capability
 - [ ] Pluggable storage backends (Postgres/pgvector, embedded graph)
 - [ ] Encryption at rest
 - [ ] Dashboard UI
-- [ ] Signed continuity records (v0.3 provides integrity, not authenticity)
 
 ## Philosophy
 

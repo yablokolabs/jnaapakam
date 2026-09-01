@@ -46,6 +46,9 @@ class Config:
     # Off by default: silently archiving an operator's memories on a timer they
     # never asked for is not a default worth having.
     expire_after_days: int | None = None
+    # A path to an Ed25519 private key. Unset means seals record integrity only:
+    # they prove a corpus did not drift, not who sealed it.
+    signing_key: str | None = None
     watch_dir: str | None = None
     max_body_bytes: int = 1_000_000
     retrieval_limit: int = 12
@@ -94,6 +97,7 @@ class Config:
             "judge_model": os.getenv("MEMORY_JUDGE_MODEL") or None,
             "consolidate_every_minutes": int(os.getenv("CONSOLIDATE_INTERVAL", "30")),
             "expire_after_days": int(os.getenv("MEMORY_EXPIRE_AFTER_DAYS") or 0) or None,
+            "signing_key": os.getenv("MEMORY_SIGNING_KEY") or None,
             "watch_dir": os.getenv("MEMORY_WATCH") or None,
         }
         values.update({k: v for k, v in overrides.items() if v is not None})

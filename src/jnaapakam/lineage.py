@@ -125,6 +125,29 @@ def _canonical(payload: dict) -> bytes:
     )
 
 
+def artifact_statement(agent_id: str, generation_id: int, artifact: dict) -> bytes:
+    """The canonical bytes a seal signature covers.
+
+    Every field that gives the digest its meaning is inside the signature: the
+    agent, the generation, the artifact's name and the moment it was recorded.
+    Signing the digest alone would leave a valid signature that could be lifted
+    onto another generation's seal, which is precisely the lie signing is meant
+    to stop.
+    """
+    return _canonical(
+        {
+            "agent_id": agent_id,
+            "generation": int(generation_id),
+            "name": artifact["name"],
+            "algorithm": artifact["algorithm"],
+            "digest": artifact["digest"],
+            "bytes": artifact["bytes"],
+            "records": artifact["records"],
+            "recorded_at": artifact["recorded_at"],
+        }
+    )
+
+
 def _as_list(value) -> list:
     """Read a JSON-array column that may arrive as text or as an already-parsed list."""
     if value is None:

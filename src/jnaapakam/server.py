@@ -222,7 +222,11 @@ async def _json_body(request: web.Request) -> dict:
 
 def build_app(config: Config, chat) -> web.Application:
     app = web.Application(client_max_size=config.max_body_bytes)
-    store = Store(config.db_path, max_query_terms=config.max_query_terms).initialize()
+    store = Store(
+        config.db_path,
+        max_query_terms=config.max_query_terms,
+        signing_key=config.signing_key,
+    ).initialize()
     app[CONFIG_KEY] = config
     app[STORE_KEY] = store
 
@@ -575,6 +579,7 @@ def build_app(config: Config, chat) -> web.Application:
                 body.get("artifacts"),
                 body.get("probes"),
                 body.get("behavioral"),
+                body.get("public_key"),
             )
         )
 

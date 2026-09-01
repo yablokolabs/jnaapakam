@@ -915,7 +915,7 @@ nothing can observe is not worth a two-phase write.
 
 ### 10.5 Continuity validation
 
-Validation produces six named checks. Each reports `pass`, `fail`, `skipped`, or —
+Validation produces eight named checks. Each reports `pass`, `fail`, `skipped`, or —
 for external state — `recorded`.
 
 | Check | Question |
@@ -923,6 +923,7 @@ for external state — `recorded`.
 | `identity` | Does this generation carry the same stable `agent_id` as the store? |
 | `memory` | Does the live corpus still match the **content** digest sealed for this generation? |
 | `semantic_state` | Is that knowledge still read the same way — validity, archival, corrections, links? |
+| `signature` | Was this seal made by a key that holds the signing secret, and by the expected one? |
 | `recall` | Can the memories the operator probed for still be retrieved? |
 | `soul` | Do the supplied artifact digests match the recorded ones? |
 | `context` | What external references were declared? |
@@ -935,6 +936,11 @@ for external state — `recorded`.
 - The `identity` check MUST NOT be skippable.
 - Validation MUST NOT dereference external state. An implementation MUST NOT report
   `pass` for a system it did not contact; `recorded` says what actually happened.
+- An implementation that cannot verify a signature — no signing support installed —
+  MUST report `skipped`, never `pass`. Unverifiable is not verified.
+- An unsigned seal MUST NOT fail validation. Signing is optional; a store that never
+  signed anything has integrity without authenticity, which is a weaker claim, not a
+  broken one.
 - Validation MUST NOT disturb retrieval statistics. Recall probes are reads on
   behalf of the operator, not recalls by the agent, and counting them would distort
   the retention signals of §8.
@@ -954,6 +960,27 @@ about a particular agent, and a protocol that guessed at it would be wrong loudl
 says nothing about who produced them, and anyone who can write the store can write
 a digest. **Cryptographic signatures are out of scope for v0.3** and are not
 simulated by anything in this section.
+
+### 10.7 Seal signatures
+
+Digests give a seal **integrity**: they detect a corpus that changed after sealing.
+They give it no **authenticity**. Whoever can write the store can recompute every
+digest, so a self-consistent continuity record proves only that nobody tampered
+carelessly. A signature over the seal is what distinguishes a corpus that survived
+from a corpus that was replaced and resealed.
+
+Signatures are OPTIONAL. An implementation that supports them:
+
+- MUST sign a canonical statement that binds, at minimum, the `agent_id`, the
+  generation, the artifact's name and algorithm, its digest, and the time it was
+  recorded. Signing the digest alone is insufficient: the signature would remain
+  valid when lifted onto another generation's seal.
+- MUST record the public key beside the signature, and SHOULD report its
+  fingerprint in the `signature` check so a reader knows *which* key sealed it.
+- MUST treat verification against the recorded key as a self-consistency check
+  only. Provenance requires the verifier to supply the key it expects; an impostor
+  records their own.
+- SHOULD default to Ed25519, and MUST name the algorithm it used.
 
 **Deterministic hashing rules:**
 

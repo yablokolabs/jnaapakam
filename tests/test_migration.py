@@ -119,3 +119,39 @@ def test_upgrading_twice_is_a_no_op(tmp_path):
         count = store.stats()["total_memories"]
         store.close()
         assert count == 1, "re-opening duplicated or dropped rows"
+
+
+V04_ARTIFACTS = """
+CREATE TABLE generation_artifacts (
+    generation_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    algorithm TEXT NOT NULL DEFAULT 'sha256',
+    digest TEXT NOT NULL,
+    bytes INTEGER,
+    records INTEGER,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (generation_id, name)
+);
+"""
+
+
+def test_a_v04_seal_survives_the_upgrade_to_signed_artifacts(tmp_path):
+    """Seals written before signing existed must read back as unsigned, not broken."""
+    path = str(tmp_path / "v04.db")
+    _write_v01_database(path)
+    db = sqlite3.connect(path)
+    db.executescript(V04_ARTIFACTS)
+    db.execute(
+        "INSERT INTO generation_artifacts (generation_id, name, digest, records, recorded_at) "
+        "VALUES (1, 'memory_corpus', ?, 3, '2026-08-31T00:00:00+00:00')",
+        ("a" * 64,),
+    )
+    db.commit()
+    db.close()
+
+    store = Store(path).initialize()
+    recorded = store.artifacts(1)
+    store.close()
+
+    assert recorded[0]["digest"] == "a" * 64
+    assert recorded[0]["signature"] is None

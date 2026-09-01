@@ -14,7 +14,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from . import lineage
+from . import lineage, signing
 from .config import Config, ConfigError
 from .llm import chat
 from .server import CONSOLIDATE_KEY, INGEST_KEY, STORE_KEY, build_app
@@ -215,7 +215,8 @@ def _serve_command(args) -> int:
 
 @contextlib.contextmanager
 def _open_store(args):
-    store = Store(Config.from_env(db_path=args.db).db_path).initialize()
+    config = Config.from_env(db_path=args.db)
+    store = Store(config.db_path, signing_key=config.signing_key).initialize()
     try:
         yield store
     finally:
@@ -348,6 +349,9 @@ def _generation_seal(args) -> int:
                 print(f"  {artifact['name']:<16} sha256:{artifact['digest']}")
         corpus = store.seal_corpus(args.id)
         print(f"  {'memory_corpus':<16} sha256:{corpus['digest']}  ({corpus['records']} records)")
+        signed = next((a for a in store.artifacts(args.id) if a["signature"]), None)
+        if signed:
+            print(f"  {'signed by':<16} {signing.fingerprint(signed['public_key'])}")
         print(f"sealed generation {args.id}")
         return 0
 
@@ -368,6 +372,7 @@ def _generation_validate(args) -> int:
             args.id,
             artifacts=list(found.values()) or None,
             probes=[{"query": q} for q in args.probe] or None,
+            public_key=args.public_key,
         )
         for name, check in result["checks"].items():
             print(f"  {name:<15}{check['status']:<9}{check['detail']}")
@@ -463,6 +468,10 @@ def _add_generation_commands(sub) -> None:
     validate = with_db(actions.add_parser("validate", help="Check a generation's continuity"))
     validate.add_argument("id", type=int)
     validate.add_argument("--soul-dir", default=None, dest="soul_dir")
+    validate.add_argument(
+        "--public-key", default=None, dest="public_key",
+        help="Hex public key the seal must carry, to check provenance rather than self-consistency",
+    )
     validate.add_argument(
         "--probe", action="append", default=[],
         help="Search text that must still return a memory. Repeatable.",
