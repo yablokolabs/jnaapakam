@@ -3,6 +3,27 @@
 All notable changes to jñāpakaṁ are recorded here. The protocol specification is
 [PROTOCOL.md](PROTOCOL.md); this file tracks the reference implementation.
 
+## [0.4.1] — 2026-09-01
+
+Three fixes to the self-hosted / OpenAI-compatible path (`LLM_BASE_URL`), which
+was documented as supported but only half-wired.
+
+### Fixed
+
+- **The cloud fallback no longer fires when `LLM_BASE_URL` is set.** A failure at
+  the custom endpoint was caught and silently retried against Anthropic or OpenAI
+  whenever their key happened to be in the environment — sending the memory content
+  to the provider the operator had chosen not to use. Self-hosting is a decision
+  about where the content is allowed to go; a transient local error must not undo
+  it. The failure is now reported as-is.
+- **Model aliases are no longer expanded against a custom endpoint.** `haiku` was
+  rewritten to `claude-haiku-4-5` before being posted to Ollama, which does not
+  serve it. The model string is now passed through exactly as written, so proxy and
+  local model names work; leaving the model unset (`default`) raises a message
+  naming `MEMORY_MODEL` instead of 404ing on every ingest.
+- **`LLM_BASE_URL` is declared in `mcpize.yaml`.** Only `LLM_API_KEY` was exposed,
+  so a hosted subscriber could supply the key but never the address.
+
 ## [0.4.0] — 2026-08-31
 
 **Content is not continuity.** v0.3 verified that an agent's memories survived a

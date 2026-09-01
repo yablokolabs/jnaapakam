@@ -375,10 +375,12 @@ in a script.
 |----------|-------|
 | **Anthropic** | `export ANTHROPIC_API_KEY=sk-ant-...` |
 | **OpenAI** | `export OPENAI_API_KEY=sk-...` |
-| **Local (Ollama)** | `export LLM_BASE_URL=http://localhost:11434/v1` |
-| **Any OpenAI-compatible** | Set `LLM_BASE_URL` and `LLM_API_KEY` |
+| **Local (Ollama)** | `export LLM_BASE_URL=http://localhost:11434/v1` and `export MEMORY_MODEL=llama3.1` |
+| **Any OpenAI-compatible** | Set `LLM_BASE_URL`, `MEMORY_MODEL`, and `LLM_API_KEY` if the endpoint needs one |
 
 Model aliases: `haiku`, `sonnet`, `opus`, `gpt4mini`, `gpt4`. Any other value is passed through unchanged, so custom and locally-hosted model names work as-is.
+
+`LLM_BASE_URL` takes over completely: every call goes to that endpoint, the aliases above are *not* expanded (your endpoint's own names are sent verbatim, so name the model with `MEMORY_MODEL` or `--model`), and the cloud fallback is disabled — a failure there is reported, never retried against Anthropic or OpenAI. Self-hosting is usually a decision about where the memory content is allowed to go, so a stray `ANTHROPIC_API_KEY` in the environment must not quietly send it off-box.
 
 > [!NOTE]
 > Provider model IDs get retired on a schedule, and a retired ID returns a 404. v0.1 shipped a default that was withdrawn while still in the code, which — combined with an over-broad `except` — meant failed extractions were stored as degraded memories and reported as successes. Both are fixed, and a test now fails the build if any shipped alias points at a known-retired model.

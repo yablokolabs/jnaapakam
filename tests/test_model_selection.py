@@ -6,8 +6,11 @@ Anthropic fallback. It retired on 2026-04-19, so every default install had been
 """
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
-from jnaapakam.llm import MODEL_ALIASES, resolve_model
+from jnaapakam import llm
+from jnaapakam.llm import MODEL_ALIASES, LLMError, resolve_model
 
 # Withdrawn by Anthropic; a request naming any of these returns 404.
 RETIRED = {
@@ -48,3 +51,50 @@ def test_an_explicit_anthropic_model_name_routes_to_anthropic():
 
     assert provider == "anthropic"
     assert model_name == "claude-sonnet-5"
+
+
+def test_a_custom_endpoint_gets_the_model_name_as_written(monkeypatch):
+    """Aliases name cloud models; a proxy or local server has its own names."""
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434/v1")
+
+    provider, model_name, base_url, _ = resolve_model("haiku")
+
+    assert (provider, model_name, base_url) == ("openai", "haiku", "http://localhost:11434/v1")
+
+
+def test_a_custom_endpoint_refuses_the_unconfigured_default(monkeypatch):
+    """`default` is a cloud alias: sending claude-haiku-4-5 to Ollama only 404s."""
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434/v1")
+
+    with pytest.raises(LLMError, match="MEMORY_MODEL"):
+        resolve_model("default")
+
+
+async def test_a_custom_endpoint_failure_never_falls_back_to_the_cloud(monkeypatch):
+    """A self-hosted endpoint is chosen for privacy; a silent cloud retry leaks the memory."""
+    calls = []
+
+    async def handler(request):
+        calls.append(request.path)
+        return web.Response(status=500, text="model unavailable")
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", handler)
+    app.router.add_post("/v1/messages", handler)
+    server = TestServer(app)
+    await server.start_server()
+    base = str(server.make_url("/v1"))
+
+    monkeypatch.setenv("LLM_BASE_URL", base)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-must-not-be-used")
+    # Point the cloud fallback at the same server, so a leak shows up as a request
+    # here instead of leaving the machine.
+    monkeypatch.setattr(llm, "ANTHROPIC_BASE", base)
+
+    try:
+        with pytest.raises(LLMError):
+            await llm.chat("llama3.1", "system", "message")
+    finally:
+        await server.close()
+
+    assert calls == ["/v1/chat/completions"]

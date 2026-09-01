@@ -78,6 +78,18 @@ def extract_json(text: str) -> dict:
 
 def resolve_model(model: str) -> tuple[str, str, str, str]:
     """Map a model alias or name to (provider, model_name, base_url, api_key)."""
+    custom_base = os.getenv("LLM_BASE_URL")
+    if custom_base:
+        # The aliases below name cloud models. A self-hosted server or proxy has its own
+        # names, so the model string is passed through exactly as written — and `default`,
+        # which names nothing there, is refused rather than 404'd on every ingest.
+        if model == "default":
+            raise LLMError(
+                "LLM_BASE_URL is set but no model was named. A custom endpoint has its own "
+                "model names: set MEMORY_MODEL (or --model) to one it serves."
+            )
+        return "openai", model, custom_base, os.getenv("LLM_API_KEY", "")
+
     if model in MODEL_ALIASES:
         provider, model_name = MODEL_ALIASES[model]
     elif model.startswith("claude"):
@@ -87,10 +99,6 @@ def resolve_model(model: str) -> tuple[str, str, str, str]:
     else:
         # Unknown names belong to whatever OpenAI-compatible endpoint is configured.
         provider, model_name = "openai", model
-
-    custom_base = os.getenv("LLM_BASE_URL")
-    if custom_base:
-        return "openai", model_name, custom_base, os.getenv("LLM_API_KEY", "")
 
     if provider == "anthropic":
         return "anthropic", model_name, ANTHROPIC_BASE, os.getenv("ANTHROPIC_API_KEY", "")
@@ -152,6 +160,10 @@ async def chat(model: str, system: str, message: str) -> str:
                 return await _chat_anthropic(session, model_name, system, message, base_url, api_key)
             return await _chat_openai(session, model_name, system, message, base_url, api_key)
         except Exception as primary_error:
+            # A custom endpoint is usually chosen to keep memory content off third-party
+            # infrastructure. Retrying against a cloud provider would send it there anyway.
+            if os.getenv("LLM_BASE_URL"):
+                raise
             fallback_key = os.getenv("OPENAI_API_KEY" if provider == "anthropic" else "ANTHROPIC_API_KEY")
             if not fallback_key:
                 raise

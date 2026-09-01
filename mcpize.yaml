@@ -39,6 +39,13 @@ credentials:
   - name: "OPENAI_API_KEY"
     required: false
     description: "OpenAI API key"
+  # Bring-your-own endpoint. Without LLM_BASE_URL here a subscriber could supply the
+  # key but never the address, so the OpenAI-compatible path was unreachable on a
+  # hosted deployment. Setting it routes every call to that endpoint and disables the
+  # cloud fallback, so memory content stays on the operator's own infrastructure.
+  - name: "LLM_BASE_URL"
+    required: false
+    description: "Base URL of an OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, a proxy)"
   - name: "LLM_API_KEY"
     required: false
     description: "API key for a custom LLM_BASE_URL endpoint"
