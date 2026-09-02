@@ -16,9 +16,10 @@ jñāpakaṁ (Sanskrit: *memory, reminder*) is an open standard for persisting A
 
 - 📋 **Soul Schema** — A standard format for defining who your agent *is*
 - 🧠 **Memory Protocol** — Ingest, retrieve, consolidate, and query agent memories over HTTP or MCP
-- 🔍 **Real retrieval** — Full-text search with BM25 ranking, using nothing but stock SQLite
+- 🔍 **Real retrieval** — Full-text search with BM25 ranking on stock SQLite, plus optional semantic search that finds the memory sharing no words with your query
 - 🔄 **Backup & Restore** — Never lose your agent's accumulated knowledge
 - 🧬 **Generational Continuity** — Change the model, runtime, machine and GPU without changing who the agent is
+- 🔏 **Signed continuity** — Optional Ed25519 seals, so a continuity record proves *who* sealed it and not merely that nobody tampered carelessly
 - 🔌 **Framework Agnostic** — Works with any agent framework, any LLM provider
 
 ## The Problem
@@ -791,8 +792,10 @@ counters) leaves them unchanged.
 
 > [!IMPORTANT]
 > A digest proves the bytes did not change. It says nothing about *who* produced
-> them: anyone who can write the store can write a digest. **v0.3 defines no
-> signatures.** Do not read integrity as authenticity.
+> them: anyone who can write the store can write a digest. Integrity is not
+> authenticity. Since v0.5 a seal can be **signed** — see
+> [Signing a seal](#signing-a-seal) — but signing is optional, and an unsigned seal
+> carries integrity alone.
 
 The server never opens a file to hash it. Digests arrive precomputed, and the CLI
 does the reading — locally, from a directory you name, restricted to soul

@@ -1,4 +1,4 @@
-# jñāpakaṁ Protocol Specification v0.4
+# jñāpakaṁ Protocol Specification v0.5
 
 ## Overview
 
@@ -7,6 +7,28 @@ The jñāpakaṁ protocol defines a standard for AI agent memory persistence. It
 1. **Soul Schema** — Static identity files that define who an agent is
 2. **Memory API** — HTTP endpoints for dynamic memory operations
 3. **Continuity Record** — The agent's permanent identity, its generations, and the migrations between them (§10)
+
+### What changed in v0.5
+
+v0.4 could prove a corpus had not drifted. It could not prove who sealed it, could
+not retire a memory that had simply stopped being used, and could only find a memory
+by the words it happened to contain.
+
+| Change | Compatibility |
+|--------|---------------|
+| **Seal signatures** (§10.7) — Ed25519 over a statement binding agent, generation and artifact | Additive; optional. An unsigned seal stays valid |
+| `signature` added as an eighth continuity check (§10.5) | Additive; reports `skipped` where unsupported |
+| **Age retention policy** — `POST /prune` gains `older_than_days`, and recall resets the clock (§8) | Additive; `keep` behaves as before |
+| Age policies MAY be applied on a schedule, and MUST be off unless configured (§8) | Additive |
+| **Semantic relevance** — an optional embedding term that widens the candidate set rather than reordering it (§5) | Additive; a deployment without it ranks exactly as before |
+| `version` reported by `/status` and `/backup` becomes `"0.5"` | **Breaking** only for a client asserting the exact string |
+
+**Why this is a version bump and not a patch.** Nothing here changes a digest or
+invalidates a v0.4 seal — a v0.4 generation validates unchanged under v0.5, with the
+new check reporting `skipped`. But §5, §8 and §10.5 all gained normative rules, and
+two implementations both claiming "0.4" would now disagree about what `/prune`
+accepts and what a `signature` check means. The version number is what tells them
+apart.
 
 ### What changed in v0.4
 
@@ -773,7 +795,7 @@ knowledge which is seldom accessed but essential.
 - Generation metadata MUST NOT be placed in an LLM prompt. Memory is a channel the agent is meant to reason over; the continuity record is not, and mixing them would make provenance a prompt-injection channel
 - Manifests MUST be refused when they carry a field naming a credential, or a reference URI with embedded userinfo. This guards against accident, not against a determined author
 - Manifest size and nesting depth MUST be bounded
-- Digests are **integrity, not authenticity**: anyone who can write the store can write a digest. v0.3 defines no signatures and MUST NOT be read as providing them
+- Digests are **integrity, not authenticity**: anyone who can write the store can write a digest. An unsigned seal MUST NOT be read as evidence of provenance. Signatures are defined in §10.7 and are optional; where they are absent the weaker claim is the only one available
 - Integrity checking MUST NOT accept a filesystem path at the network API. The client computes digests; an endpoint that hashes a caller-supplied path is an arbitrary-file-read oracle
 - Artifact names are labels and MUST be rejected if they could be resolved against a filesystem
 - Continuity operations that change state MUST require the same authentication as every other non-public endpoint
@@ -1147,6 +1169,7 @@ manifest, an external database:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.5 | 2026-09-02 | Seal signatures (§10.7) and a `signature` continuity check, both optional and both reporting `skipped` rather than `pass` where unsupported; an age-based retention policy on `/prune` whose clock is reset by recall (§8), applicable on a schedule but off unless configured; optional semantic relevance that widens the candidate set rather than reordering it, with a required fallback to lexical ranking (§5) |
 | 0.1 | 2026-03-08 | Initial protocol specification |
 | 0.2 | 2026-08-05 | Retrieval as a protocol operation (`/search`, ranking requirements); enforceable namespaces (§6); memory correction by supersession (§7); gated contradiction detection and soft forgetting (§8); bearer authentication and safe bind defaults; error semantics; corrected default port and `/backup` payload |
 | 0.4 | 2026-08-31 | Continuity integrity split into a content digest and a semantic state digest (§10.6): validity intervals, archival, correction chains and consolidation links are now verified, with cross-row references hashed by target content so they survive renumbering; `semantic_state` added as a seventh continuity check |

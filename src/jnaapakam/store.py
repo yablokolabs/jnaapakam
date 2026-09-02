@@ -24,7 +24,7 @@ log = logging.getLogger("jnaapakam.store")
 # upgrade runs exactly once per database. v0.1 files report 0.
 SCHEMA_VERSION = 6
 
-PROTOCOL_VERSION = "0.4"
+PROTOCOL_VERSION = "0.5"
 
 GENERATION_STATUSES = ("staged", "promoted", "rejected")
 

@@ -3,7 +3,12 @@
 All notable changes to jñāpakaṁ are recorded here. The protocol specification is
 [PROTOCOL.md](PROTOCOL.md); this file tracks the reference implementation.
 
-## [Unreleased]
+## [0.5.0] — 2026-09-02
+
+**Integrity is not authenticity, and words are not meaning.** v0.4 could prove a
+corpus had not drifted. It could not prove who sealed it, could not retire a memory
+that had simply stopped being used, and could only find a memory by the words it
+happened to contain.
 
 ### Added
 
@@ -56,8 +61,13 @@ All notable changes to jñāpakaṁ are recorded here. The protocol specificatio
   candidate set rather than reorder it, and the requirement to fall back to lexical
   ranking rather than fail.
 
-### Changed
+### Changed — breaking only for a client asserting the exact string
 
+- Protocol version reported by `/status` and `/backup` becomes `"0.5"`. No digest
+  rule changed: a v0.4 generation validates unchanged, with `signature` reporting
+  `skipped`. The bump is because §5, §8 and §10.5 gained normative rules, and two
+  implementations both claiming "0.4" would now disagree about what `/prune` accepts
+  and what a `signature` check means.
 - `/status`, `/health` and the MCP server info now report the installed package
   version instead of a hardcoded `0.4.0` that went stale at the last release.
 - Schema version 6: a `memory_embeddings` table, storing the model with each vector
