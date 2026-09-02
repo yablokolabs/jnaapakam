@@ -226,7 +226,7 @@ Returns memory statistics.
   "total_memories": 42,
   "unconsolidated": 5,
   "consolidations": 8,
-  "version": "0.4"
+  "version": "0.5"
 }
 ```
 
@@ -443,7 +443,7 @@ Export memories, consolidations, and the continuity record as JSON.
 
 ```json
 {
-  "version": "0.4",
+  "version": "0.5",
   "exported_at": "2026-03-08T12:00:00Z",
   "agent_id": "urn:jnaapakam:agent:...",
   "current_generation": 2,
@@ -494,7 +494,7 @@ authentication as the rest of the API. See §10 for their semantics.
 
 ```json
 {"agent_id": "urn:jnaapakam:agent:...", "created_at": "...",
- "current_generation": 2, "generations": 3, "version": "0.3"}
+ "current_generation": 2, "generations": 3, "version": "0.5"}
 ```
 
 #### GET /generations
@@ -789,7 +789,7 @@ knowledge which is seldom accessed but essential.
 - Error responses MUST NOT return internal exception text to the caller; upstream provider errors routinely quote credentials and filesystem paths
 - Ingested content is untrusted input that later reaches an LLM prompt; implementations SHOULD treat retrieved memories as data rather than instructions
 
-### Trust boundaries for the continuity record (v0.3)
+### Trust boundaries for the continuity record (§10)
 
 - Generation manifests and external-state references are **untrusted metadata**. They MUST NOT be executed, dereferenced, or used to construct a filesystem path
 - Generation metadata MUST NOT be placed in an LLM prompt. Memory is a channel the agent is meant to reason over; the continuity record is not, and mixing them would make provenance a prompt-injection channel
@@ -994,8 +994,9 @@ about a particular agent, and a protocol that guessed at it would be wrong loudl
 
 **Integrity is not authenticity.** A digest proves the bytes did not change. It
 says nothing about who produced them, and anyone who can write the store can write
-a digest. **Cryptographic signatures are out of scope for v0.3** and are not
-simulated by anything in this section.
+a digest. Nothing in this section supplies authenticity, and nothing in it should be
+read as simulating a signature. Authenticity is defined separately and optionally in
+§10.7; where a seal is unsigned, integrity is the only claim available.
 
 ### 10.7 Seal signatures
 

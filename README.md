@@ -783,7 +783,7 @@ content digest of what they point at**, never as a row id. So `17 → 26` becomi
 `3 → 91` after a restore renumbers everything still matches, while `17 → nothing`
 fails.
 
-### Integrity, not authenticity
+### Integrity, and authenticity only when signed
 
 Digests are SHA-256 over the exact bytes on disk — no newline translation, no BOM
 stripping, no normalisation. Both corpus digests are order-independent so they
