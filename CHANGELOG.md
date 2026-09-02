@@ -3,6 +3,29 @@
 All notable changes to jñāpakaṁ are recorded here. The protocol specification is
 [PROTOCOL.md](PROTOCOL.md); this file tracks the reference implementation.
 
+## [0.5.1] — 2026-09-02
+
+### Fixed
+
+- **A stopword no longer counts as a search term** ([#8](https://github.com/yablokolabs/jnaapakam/issues/8)).
+  BM25 relevance is normalised against the best candidate in the set, so a memory
+  matching only on `the` scored a full 1.0 and could outrank a real match. Harmless
+  while ranking was purely lexical; wrong once semantic scores compete on the same
+  axis — `"when is the meeting"` returned a deployment runbook ahead of the standup
+  note it was obviously asking for. Function words are now dropped from the FTS
+  query, unless that would leave nothing, in which case the query stands as written:
+  someone searching for a common word deserves that search, and turning a deliberate
+  query into silence is worse than answering it.
+
+### Documented
+
+- **`/memories` returning archived records is deliberate**
+  ([#9](https://github.com/yablokolabs/jnaapakam/issues/9)). §8's exclusion rule
+  applies to retrieval — the content-addressed operations of §5 — not to a listing
+  of what the store holds. Every record carries `archived`, so a caller who wants
+  them separated can separate them. Spelled out in §8 and the README rather than
+  left as an accident of implementation.
+
 ## [0.5.0] — 2026-09-02
 
 **Integrity is not authenticity, and words are not meaning.** v0.4 could prove a

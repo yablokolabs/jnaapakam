@@ -326,3 +326,48 @@ async def test_an_internal_error_does_not_leak_details_over_mcp(config):
         message = (await resp.json())["error"]["message"]
         assert "TOPSECRET" not in message
         assert "/home/secret" not in message
+
+
+# ---- stopword relevance (issue #8) --------------------------------------
+
+
+def test_a_stopword_is_not_a_search_term():
+    """`the` appears in nearly every memory, so matching on it ranks the corpus at random.
+
+    BM25 relevance is normalised against the best candidate in the set, so the
+    memory that happened to contain `the` scored a full 1.0 and outranked a perfect
+    semantic match. See issue #8.
+    """
+    assert build_match_query("when is the meeting") == '"meeting"'
+
+
+def test_a_query_of_nothing_but_stopwords_is_searched_as_written():
+    """Dropping every term would turn a deliberate search into silence, which is worse."""
+    assert build_match_query("is the a of") == '"is" OR "the" OR "a" OR "of"'
+
+
+def test_a_stopword_searched_for_on_its_own_is_still_searched_for():
+    """Dropping every term would turn a deliberate search into silence."""
+    assert build_match_query("the") == '"the"'
+
+
+def test_stopword_filtering_leaves_an_ordinary_query_alone():
+    assert build_match_query("deployment runbook") == '"deployment" OR "runbook"'
+
+
+def test_a_stopword_only_match_no_longer_outranks_a_real_one(store):
+    """The end-to-end shape of issue #8, without embeddings in the way."""
+    store.add_memory(
+        raw_text="the release runbook lives in the ops repository",
+        summary="the release runbook lives in the ops repository",
+        entities=[], topics=[], importance=0.9, source="test",
+    )
+    standup = store.add_memory(
+        raw_text="standup moved to 09:30 on Tuesday",
+        summary="standup moved to 09:30 on Tuesday",
+        entities=[], topics=[], importance=0.5, source="test",
+    )
+
+    hits = store.search("when is the standup")
+
+    assert [h["id"] for h in hits] == [standup], "only the real term should match"

@@ -188,6 +188,19 @@ def _now() -> str:
 
 MAX_QUERY_TERMS = 32
 
+# Words that carry no retrieval signal because they are in nearly every memory.
+# BM25 relevance is normalised against the best candidate in the set, so a memory
+# that matched on "the" alone scored a full 1.0 and could outrank a genuine match —
+# harmless while ranking was purely lexical, wrong once semantic scores compete on
+# the same axis. Deliberately short: this drops function words, not domain words,
+# because a stoplist that guesses at meaning starts hiding what a user asked for.
+STOPWORDS = frozenset([
+    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from", "had", "has",
+    "have", "how", "if", "in", "into", "is", "it", "its", "of", "on", "or", "that", "the", "their",
+    "there", "they", "this", "to", "was", "were", "what", "when", "where", "which", "who", "will",
+    "with", "would", "you", "your",
+])
+
 
 def build_match_query(text: str, max_terms: int = MAX_QUERY_TERMS) -> str:
     """Turn arbitrary user text into a safe FTS5 MATCH expression.
@@ -195,6 +208,10 @@ def build_match_query(text: str, max_terms: int = MAX_QUERY_TERMS) -> str:
     Every token is quoted, so FTS5 operators a user happens to type (``OR``,
     ``NEAR(``, ``*``, a stray quote) are searched for as text instead of being
     executed as query syntax or raising a parse error.
+
+    Stopwords are dropped — unless that would leave nothing, in which case the
+    query stands as written. Someone searching for a common word deserves that
+    search; it is only worthless *alongside* real terms.
     """
     seen: dict[str, None] = {}
     for token in re.findall(r"\w+", text or "", re.UNICODE):
@@ -203,7 +220,8 @@ def build_match_query(text: str, max_terms: int = MAX_QUERY_TERMS) -> str:
             # Cost grows roughly quadratically in matching terms, and search holds a
             # process-wide lock, so an uncapped query stalls every other request.
             break
-    return " OR ".join(f'"{token}"' for token in seen)
+    terms = [token for token in seen if token.lower() not in STOPWORDS] or list(seen)
+    return " OR ".join(f'"{token}"' for token in terms)
 
 
 def _statements(script: str) -> list[str]:

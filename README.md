@@ -563,6 +563,13 @@ curl "http://localhost:8889/search?q=...&include_archived=true"   # still reacha
 curl -X POST http://localhost:8889/archive -d '{"memory_id": 7, "restore": true}'
 ```
 
+`/search` and `/query` exclude archived memories unless you ask for them. `/memories`
+does not: it is a listing of what the store holds, not a retrieval, and every record
+carries an `archived` flag for a caller that wants to tell them apart. The asymmetry
+is deliberate — asking *what is in the store* is a different question from asking
+*what should the agent recall*, and only the second one archival is entitled to
+answer.
+
 Two policies, because they answer different questions. `keep` bounds how much a
 namespace holds; `older_than_days` retires what has stopped being used. A namespace
 comfortably under its cap can still be full of memories nobody has read in a year.

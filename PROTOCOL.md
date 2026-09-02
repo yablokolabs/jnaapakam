@@ -426,7 +426,7 @@ Archive or restore a single memory.
 
 **Rules:**
 - Forgetting MUST be reversible. An implementation MUST NOT delete memories to satisfy a retention policy; `/delete` remains the only destructive operation.
-- Archived memories MUST be excluded from retrieval by default and reachable when explicitly requested.
+- Archived memories MUST be excluded from retrieval by default and reachable when explicitly requested. "Retrieval" here means the content-addressed operations of §5 — `/search` and `/query`. A listing endpoint such as `/memories` is not retrieval: it reports what the store holds, in storage order, and MAY include archived records. Every record carries `archived`, so a client that wants them separated can separate them; a client that asks *what is in the store* is not asking a question archival should silently answer.
 - Retention scoring SHOULD combine importance, access frequency, and temporal decay. Frequency is the outcome-grounded term; `importance` is assigned once and never revised.
 - Superseded memories SHOULD be evicted before live ones.
 - An age policy MAY be applied on a schedule rather than only on request. It MUST be
