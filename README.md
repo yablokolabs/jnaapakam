@@ -179,9 +179,7 @@ Two further protections on the default loopback deployment:
 
 ### Agent soul and server pipeline
 
-<p align="center">
-  <img src="docs/architecture/soul-pipeline.svg" alt="Agent soul and server pipeline" />
-</p>
+![Agent soul and server pipeline](docs/architecture/soul-pipeline.svg)
 
 ### System overview
 
