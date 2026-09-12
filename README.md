@@ -177,39 +177,27 @@ Two further protections on the default loopback deployment:
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   Your AI Agent                     │
-│  ┌──────────┐  ┌───────────┐  ┌───────────────────┐ │
-│  │ SOUL.md  │  │IDENTITY.md│  │    MEMORY.md      │ │
-│  │personality│ │name, emoji│  │curated long-term  │ │
-│  └──────────┘  └───────────┘  └───────────────────┘ │
-└──────────────────────┬──────────────────────────────┘
-                       │ HTTP  /  MCP
-              ┌────────▼─────────┐
-              │  jñāpakaṁ Server │
-              │                  │
-              │  ┌────────────┐  │
-              │  │  Ingest    │  │  ← New information arrives
-              │  │  (LLM)     │  │  ← Extract entities, topics, importance
-              │  └─────┬──────┘  │
-              │        ▼         │
-              │  ┌────────────┐  │
-              │  │  SQLite    │  │  ← Structured store
-              │  │  + FTS5    │  │  ← Full-text index, BM25 ranked
-              │  └─────┬──────┘  │
-              │        ▼         │
-              │  ┌────────────┐  │
-              │  │  Retrieve  │  │  ← relevance × recency × importance
-              │  │  (ranking) │  │  ← no LLM call, no network
-              │  └─────┬──────┘  │
-              │        ▼         │
-              │  ┌────────────┐  │
-              │  │Consolidate │  │  ← Periodic: find patterns, connections
-              │  │  (LLM)     │  │
-              │  └────────────┘  │
-              └──────────────────┘
-```
+### Agent soul and server pipeline
+
+<p align="center">
+  <img src="docs/architecture/soul-pipeline.svg" alt="Agent soul and server pipeline" />
+</p>
+
+### System overview
+
+![System overview](docs/architecture/system-overview.svg)
+
+### Memory lifecycle
+
+![Memory lifecycle](docs/architecture/memory-lifecycle-sequence.svg)
+
+### Retrieval ranking
+
+![Retrieval ranking](docs/architecture/retrieval-ranking-dataflow.svg)
+
+### Storage schema
+
+![Storage schema](docs/architecture/storage-continuity-dbschema.svg)
 
 ### How It Works
 

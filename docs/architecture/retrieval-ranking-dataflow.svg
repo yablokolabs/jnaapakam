@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1000 620" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="retrieval-ranking-dataflow-title retrieval-ranking-dataflow-desc">
+      <title id="retrieval-ranking-dataflow-title">Retrieval ranking data flow</title>
+      <desc id="retrieval-ranking-dataflow-desc">Data flow showing a query fanning out to BM25 lexical search and semantic scan, blending into relevance, then ranking with recency and importance weights.</desc>
+      <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Sans+KR:wght@400;500;600&amp;family=Noto+Serif+KR:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;display=swap');</style>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+      </defs>
+      <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+      <!-- Arrows (before boxes) -->
+      <!-- Query -> FTS5 -->
+      <line x1="240" y1="196" x2="300" y2="196" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="258" y="176" width="24" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="270" y="185" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ASK</text>
+      <!-- Query -> Semantic (over the top) -->
+      <path d="M 140,160 V 148 Q 140,140 148,140 H 772 Q 780,140 780,148 V 160" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="438" y="120" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="456" y="129" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">VEC</text>
+      <!-- FTS5 -> Blend -->
+      <line x1="440" y1="232" x2="440" y2="272" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="448" y="244" width="32" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="464" y="253" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">LEX</text>
+      <!-- Semantic -> Blend (left lane) -->
+      <path d="M 640,208 H 618 Q 610,208 610,216 V 300 Q 610,308 602,308 H 580" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="606" y="188" width="32" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="622" y="197" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SEM</text>
+      <!-- Blend -> Rank -->
+      <line x1="580" y1="308" x2="640" y2="308" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+      <rect x="592" y="288" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="610" y="297" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SUM</text>
+      <!-- Recency -> Rank (right lane) -->
+      <path d="M 620,420 H 942 Q 950,420 950,412 V 316 Q 950,308 942,308 H 920" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="958" y="354" width="32" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="974" y="363" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">0.25</text>
+      <!-- Importance -> Rank (bottom lane) -->
+      <path d="M 160,384 V 376 Q 160,368 168,368 H 812 Q 820,368 820,360 V 344" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="472" y="348" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="490" y="357" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">0.15</text>
+
+      <!-- Nodes row 1 -->
+      <rect x="40" y="160" width="200" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="40" y="160" width="200" height="72" rx="6" fill="#4f5d75" fill-opacity="0.10" stroke="#7a8399" stroke-width="1"/>
+      <rect x="48" y="166" width="36" height="12" rx="2" fill="none" stroke="#7a8399" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="66" y="175" fill="#7a8399" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">INPUT</text>
+      <text x="140" y="200" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Query</text>
+      <text x="140" y="216" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">text · namespace</text>
+
+      <rect x="300" y="160" width="280" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="300" y="160" width="280" height="72" rx="6" fill="#2d3142" fill-opacity="0.05" stroke="#4f5d75" stroke-width="1"/>
+      <rect x="308" y="166" width="40" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="328" y="175" fill="#2d3142" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+      <text x="440" y="200" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">FTS5 candidates</text>
+      <text x="440" y="216" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">BM25 · top 200</text>
+
+      <rect x="640" y="160" width="280" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="640" y="160" width="280" height="72" rx="6" fill="#2d3142" fill-opacity="0.05" stroke="#4f5d75" stroke-width="1"/>
+      <rect x="648" y="166" width="40" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="668" y="175" fill="#2d3142" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+      <text x="780" y="200" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Semantic scan</text>
+      <text x="780" y="216" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">cosine · numpy</text>
+
+      <!-- Nodes row 2 -->
+      <rect x="300" y="272" width="280" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="300" y="272" width="280" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="308" y="278" width="32" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="324" y="287" fill="#2d3142" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STEP</text>
+      <text x="440" y="312" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Blend relevance</text>
+      <text x="440" y="328" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">0.5 lex · 0.5 sem</text>
+
+      <rect x="640" y="272" width="280" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="640" y="272" width="280" height="72" rx="6" fill="#eb6c36" fill-opacity="0.08" stroke="#eb6c36" stroke-width="1.2"/>
+      <rect x="648" y="278" width="36" height="12" rx="2" fill="none" stroke="#eb6c36" stroke-opacity="0.50" stroke-width="0.8"/>
+      <text x="666" y="287" fill="#eb6c36" fill-opacity="0.9" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">FOCAL</text>
+      <text x="780" y="312" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Rank top N</text>
+      <text x="780" y="328" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">score · limit</text>
+
+      <!-- Nodes row 3 -->
+      <rect x="40" y="384" width="240" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="40" y="384" width="240" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="48" y="390" width="32" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="64" y="399" fill="#2d3142" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STEP</text>
+      <text x="160" y="424" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Importance</text>
+      <text x="160" y="440" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">LLM 0..1 · fixed</text>
+
+      <rect x="380" y="384" width="240" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="380" y="384" width="240" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="388" y="390" width="32" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="404" y="399" fill="#2d3142" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STEP</text>
+      <text x="500" y="424" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Recency decay</text>
+      <text x="500" y="440" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">half-life 30d</text>
+
+      <!-- Legend -->
+      <line x1="30" y1="544" x2="970" y2="544" stroke="#2d3142" stroke-opacity="0.10" stroke-width="0.8"/>
+      <text x="30" y="564" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+      <rect x="110" y="556" width="12" height="12" rx="2" fill="#eb6c36" fill-opacity="0.08" stroke="#eb6c36" stroke-width="1"/>
+      <text x="128" y="566" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace">rank</text>
+      <rect x="180" y="556" width="12" height="12" rx="2" fill="#2d3142" fill-opacity="0.05" stroke="#4f5d75" stroke-width="1"/>
+      <text x="198" y="566" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace">retrieval</text>
+      <line x1="280" y1="562" x2="312" y2="562" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <text x="318" y="566" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace">flow</text>
+    </svg>

@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1000 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="system-overview-title system-overview-desc">
+      <title id="system-overview-title">jnaapakam System Overview</title>
+      <desc id="system-overview-desc">Architecture showing agents reaching the jnaapakam Server over HTTP and MCP, which coordinates Ingest and Retrieve flows between SQLite storage and LLM providers.</desc>
+      <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Sans+KR:wght@400;500;600&amp;family=Noto+Serif+KR:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;display=swap');</style>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+      </defs>
+      <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+      <!-- Zones -->
+      <rect x="32" y="140" width="288" height="340" rx="8" fill="#2d3142" fill-opacity="0.02" stroke="#2d3142" stroke-opacity="0.10" stroke-width="0.8"/>
+      <rect x="352" y="140" width="296" height="340" rx="8" fill="#2d3142" fill-opacity="0.02" stroke="#2d3142" stroke-opacity="0.10" stroke-width="0.8"/>
+      <rect x="680" y="140" width="288" height="340" rx="8" fill="#2d3142" fill-opacity="0.02" stroke="#2d3142" stroke-opacity="0.10" stroke-width="0.8"/>
+      <rect x="48" y="144" width="52" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="74" y="153" fill="#2d3142" fill-opacity="0.40" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">EDGE</text>
+      <rect x="368" y="144" width="52" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="394" y="153" fill="#2d3142" fill-opacity="0.40" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">CORE</text>
+      <rect x="696" y="144" width="52" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="722" y="153" fill="#2d3142" fill-opacity="0.40" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">DATA</text>
+
+      <!-- Arrows (before boxes) -->
+      <!-- A1 Agent -> Server -->
+      <line x1="296" y1="242" x2="384" y2="242" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="320" y="222" width="40" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="340" y="231" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">WRITE</text>
+      <!-- A2 MCP -> Jobs -->
+      <line x1="296" y1="358" x2="384" y2="358" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="320" y="338" width="40" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="340" y="347" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">MCP</text>
+      <!-- A3 Server -> SQLite -->
+      <line x1="616" y1="250" x2="708" y2="250" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+      <rect x="644" y="230" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="662" y="239" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SQL</text>
+      <!-- A6 SQLite -> Server return -->
+      <line x1="708" y1="270" x2="616" y2="270" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <rect x="644" y="250" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="662" y="259" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">HITS</text>
+      <!-- A4 Server -> LLM -->
+      <path d="M 560,300 V 364 Q 560,372 568,372 H 708" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="568" y="328" width="44" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="590" y="337" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">CHAT</text>
+      <!-- A5 LLM -> Server return -->
+      <path d="M 780,332 V 328 Q 780,320 772,320 H 608 Q 600,320 600,312 V 300" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <rect x="668" y="300" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="686" y="309" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">JSON</text>
+
+      <!-- Nodes -->
+      <!-- N1 Agent -->
+      <rect x="56" y="200" width="240" height="84" rx="6" fill="#f5f5f5"/>
+      <rect x="56" y="200" width="240" height="84" rx="6" fill="#4f5d75" fill-opacity="0.10" stroke="#7a8399" stroke-width="1"/>
+      <rect x="64" y="206" width="36" height="12" rx="2" fill="none" stroke="#7a8399" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="82" y="215" fill="#7a8399" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">USER</text>
+      <text x="176" y="244" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Agent / CLI</text>
+      <text x="176" y="262" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">curl · CLI · SDK</text>
+      <!-- N2 MCP -->
+      <rect x="56" y="316" width="240" height="84" rx="6" fill="#f5f5f5"/>
+      <rect x="56" y="316" width="240" height="84" rx="6" fill="#2d3142" fill-opacity="0.03" stroke="#2d3142" stroke-opacity="0.30" stroke-width="1"/>
+      <rect x="64" y="322" width="28" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="78" y="331" fill="#2d3142" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">MCP</text>
+      <text x="176" y="360" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">MCP Client</text>
+      <text x="176" y="378" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">tools/list · call</text>
+      <!-- N3 Server focal -->
+      <rect x="384" y="200" width="232" height="100" rx="6" fill="#f5f5f5"/>
+      <rect x="384" y="200" width="232" height="100" rx="6" fill="#eb6c36" fill-opacity="0.08" stroke="#eb6c36" stroke-width="1.2"/>
+      <rect x="392" y="206" width="36" height="12" rx="2" fill="none" stroke="#eb6c36" stroke-opacity="0.50" stroke-width="0.8"/>
+      <text x="410" y="215" fill="#eb6c36" fill-opacity="0.9" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CORE</text>
+      <text x="500" y="248" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">jnaapakam Server</text>
+      <text x="500" y="266" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">ingest · retrieve · query</text>
+      <!-- N4 Jobs optional -->
+      <rect x="384" y="316" width="232" height="84" rx="6" fill="#f5f5f5"/>
+      <rect x="384" y="316" width="232" height="84" rx="6" fill="#2d3142" fill-opacity="0.02" stroke="#2d3142" stroke-opacity="0.20" stroke-width="1" stroke-dasharray="4,3"/>
+      <rect x="392" y="322" width="32" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="408" y="331" fill="#2d3142" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">JOBS</text>
+      <text x="500" y="360" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Background jobs</text>
+      <text x="500" y="378" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">watch · consolidate</text>
+      <!-- N5 SQLite focal -->
+      <rect x="708" y="200" width="232" height="100" rx="6" fill="#f5f5f5"/>
+      <rect x="708" y="200" width="232" height="100" rx="6" fill="#eb6c36" fill-opacity="0.08" stroke="#eb6c36" stroke-width="1.2"/>
+      <rect x="716" y="206" width="40" height="12" rx="2" fill="none" stroke="#eb6c36" stroke-opacity="0.50" stroke-width="0.8"/>
+      <text x="736" y="215" fill="#eb6c36" fill-opacity="0.9" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+      <text x="824" y="248" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">SQLite + FTS5</text>
+      <text x="824" y="266" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">BM25 · namespaces</text>
+      <!-- N6 LLM external -->
+      <rect x="708" y="332" width="232" height="80" rx="6" fill="#f5f5f5"/>
+      <rect x="708" y="332" width="232" height="80" rx="6" fill="#2d3142" fill-opacity="0.03" stroke="#2d3142" stroke-opacity="0.30" stroke-width="1"/>
+      <rect x="716" y="338" width="28" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+      <text x="730" y="347" fill="#2d3142" fill-opacity="0.8" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LLM</text>
+      <text x="824" y="376" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">LLM Providers</text>
+      <text x="824" y="394" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">anthropic · openai</text>
+
+      <!-- Legend -->
+      <line x1="30" y1="524" x2="970" y2="524" stroke="#2d3142" stroke-opacity="0.10" stroke-width="0.8"/>
+      <text x="30" y="544" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+      <rect x="30" y="552" width="12" height="12" rx="2" fill="#eb6c36" fill-opacity="0.08" stroke="#eb6c36" stroke-width="1"/>
+      <text x="48" y="562" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace">focal</text>
+      <rect x="110" y="552" width="12" height="12" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="128" y="562" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace">service</text>
+      <line x1="200" y1="558" x2="232" y2="558" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <text x="238" y="562" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace">api call</text>
+      <line x1="310" y1="558" x2="342" y2="558" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <text x="348" y="562" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace">return</text>
+    </svg>
