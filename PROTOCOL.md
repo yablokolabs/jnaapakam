@@ -1,4 +1,4 @@
-# jñāpakaṁ Protocol Specification v0.5
+# jñāpakaṁ Protocol Specification v0.6
 
 ## Overview
 
@@ -7,6 +7,24 @@ The jñāpakaṁ protocol defines a standard for AI agent memory persistence. It
 1. **Soul Schema** — Static identity files that define who an agent is
 2. **Memory API** — HTTP endpoints for dynamic memory operations
 3. **Continuity Record** — The agent's permanent identity, its generations, and the migrations between them (§10)
+
+### What changed in v0.6
+
+v0.5 could sign a corpus, but had nowhere to say *who* may act on anything outside
+the store. An agent with persistent memory operates on repositories — opening pull
+requests, reviewing code, managing issues — and the protocol scoped its *memory*
+(§6) without offering a slot for scoping its *actions*.
+
+| Change | Compatibility |
+|--------|---------------|
+| **Governance extension point** (§11) — an optional `GOVERNANCE.md` or `repo-governance/` directory declaring which agent identities and memory scopes may take which repository actions | Additive; optional. A deployment without it is unchanged |
+| `version` reported by `/status` and `/backup` becomes `"0.6"` | **Breaking** only for a client asserting the exact string |
+
+**Why this is a version bump and not a patch.** A slot only works if its name and
+meaning are fixed; two deployments both claiming "0.5" would otherwise be free to
+look for governance in different places and each believe it had found the other's.
+No memory, digest or continuity rule changes — a v0.5 store opens and validates
+unchanged.
 
 ### What changed in v0.5
 
@@ -177,6 +195,11 @@ Environment-specific tool configurations and notes.
 #### HEARTBEAT.md
 Periodic tasks the agent should check on.
 
+#### GOVERNANCE.md
+Which agent identities and memory scopes may perform which repository operations.
+See §11. A `repo-governance/` directory beside the soul files is an equivalent
+location, not a second mechanism.
+
 ## 2. Memory API
 
 ### Transport
@@ -226,7 +249,7 @@ Returns memory statistics.
   "total_memories": 42,
   "unconsolidated": 5,
   "consolidations": 8,
-  "version": "0.5"
+  "version": "0.6"
 }
 ```
 
@@ -443,7 +466,7 @@ Export memories, consolidations, and the continuity record as JSON.
 
 ```json
 {
-  "version": "0.5",
+  "version": "0.6",
   "exported_at": "2026-03-08T12:00:00Z",
   "agent_id": "urn:jnaapakam:agent:...",
   "current_generation": 2,
@@ -494,7 +517,7 @@ authentication as the rest of the API. See §10 for their semantics.
 
 ```json
 {"agent_id": "urn:jnaapakam:agent:...", "created_at": "...",
- "current_generation": 2, "generations": 3, "version": "0.5"}
+ "current_generation": 2, "generations": 3, "version": "0.6"}
 ```
 
 #### GET /generations
@@ -1166,10 +1189,67 @@ manifest, an external database:
   context would make the continuity record a prompt-injection channel.
 - Generation metadata MUST NOT be used to construct a filesystem path.
 
+## 11. Governance Extension Point
+
+An agent with persistent memory acts on systems whose policies this specification
+does not own: it opens pull requests, reviews code, manages issues. §6 scopes the
+agent's *memory*; it says nothing about its *actions*. This section defines where a
+declaration of those actions' authorization lives, so it travels with the agent's
+soul files instead of being buried in one implementation's configuration.
+
+The extension point is a slot, not a subsystem. jñāpakaṁ records the declaration
+and stops there: the system performing the action — a policy engine, a CI check, the
+agent itself — is what enforces it. Operational concerns belong outside the
+protocol, as §10 already states for durable execution and deployment.
+
+**Location.** Either form is valid, and an implementation MUST NOT require both:
+
+```
+repo-governance/
+  ├── AGENTOWNERS.yml        # agent permissions for repository operations
+  └── AGENTOWNERS.yml.lock   # signed manifest of the authorized agents
+```
+
+or a flat `GOVERNANCE.md` beside the soul files.
+
+**Rules:**
+
+- These files are OPTIONAL. An implementation MUST NOT reject a soul directory that
+  contains them, and MUST NOT treat their absence as an error.
+- Absence means the protocol declares no policy. It MUST NOT be read as an
+  allow-all decision: "nobody wrote this down" and "everyone is authorized" are
+  different claims, and a governance slot that defaulted to the second would make
+  writing nothing the most permissive thing an operator could do.
+- Governance files are operator metadata, not memory. An implementation MUST NOT
+  ingest them, embed them, or place their contents in an LLM prompt. They share the
+  trust boundary of generation manifests (§9).
+- Like soul files, they are plain files on disk: version-controlled by the user and
+  excluded from `/backup`. Their digests MAY be recorded as generation artifacts
+  (§10.6), so a change in authorization is visible in the continuity record.
+- The protocol does not define evaluation semantics. An implementation that
+  evaluates a governance file MUST document the schema it reads and MUST fail
+  closed: an unparseable, unknown or ambiguous rule MUST NOT grant an action.
+- A client that acts on a repository SHOULD consult the governance file before
+  acting. The protocol cannot verify that it did; enforcement belongs to the layer
+  that performs the action.
+
+The [AGENTOWNERS](https://github.com/cschanhniem/AGENTOWNERS) specification is a
+companion policy engine for exactly this file — deterministic file classification,
+agent detection, and `block > require_approval > allow` evaluation. Where a
+deployment needs an evaluator rather than a slot, referencing it is RECOMMENDED over
+defining a second schema here.
+
+**Why the decision does not live here.** A memory server does not know which
+repositories the agent can reach, which branches are protected, or who approved a
+review. A protocol that specified the evaluation would be specifying policy for a
+system it cannot see, and every implementation that guessed would fail in the
+direction of allowing something.
+
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.6 | 2026-11-12 | Governance extension point (§11): an optional `GOVERNANCE.md` or `repo-governance/` directory declaring which agent identities and memory scopes may take which repository operations. The protocol fixes where the declaration lives, that its absence means no policy rather than allow-all, and that governance metadata is not memory; evaluation is left to the layer that performs the action |
 | 0.5 | 2026-09-02 | Seal signatures (§10.7) and a `signature` continuity check, both optional and both reporting `skipped` rather than `pass` where unsupported; an age-based retention policy on `/prune` whose clock is reset by recall (§8), applicable on a schedule but off unless configured; optional semantic relevance that widens the candidate set rather than reordering it, with a required fallback to lexical ranking (§5) |
 | 0.1 | 2026-03-08 | Initial protocol specification |
 | 0.2 | 2026-08-05 | Retrieval as a protocol operation (`/search`, ranking requirements); enforceable namespaces (§6); memory correction by supersession (§7); gated contradiction detection and soft forgetting (§8); bearer authentication and safe bind defaults; error semantics; corrected default port and `/backup` payload |

@@ -3,6 +3,25 @@
 All notable changes to jñāpakaṁ are recorded here. The protocol specification is
 [PROTOCOL.md](PROTOCOL.md); this file tracks the reference implementation.
 
+## [0.6.0] — 2026-11-12
+
+### Added
+
+- **Governance extension point** ([#2](https://github.com/yablokolabs/jnaapakam/issues/2)).
+  A soul directory may now carry `GOVERNANCE.md` or a `repo-governance/` directory
+  declaring which agent identities and memory scopes may perform which repository
+  operations. The protocol fixes only where the declaration lives, that its absence
+  means no policy rather than allow-all, and that governance files are operator
+  metadata rather than memory; evaluation stays with the layer that performs the
+  action, because a memory server cannot see protected branches or review approvals.
+  The companion `AGENTOWNERS` specification is named as a compatible evaluator.
+  `/status`, `/backup` and `/agent` report protocol version `0.6`.
+
+### Changed
+
+- `PROTOCOL_VERSION` is `"0.6"`. No schema, digest or continuity rule changed; a
+  v0.5 store opens and validates unchanged.
+
 ## [0.5.1] — 2026-09-02
 
 ### Fixed
