@@ -14,7 +14,8 @@ All notable changes to jñāpakaṁ are recorded here. The protocol specificatio
   means no policy rather than allow-all, and that governance files are operator
   metadata rather than memory; evaluation stays with the layer that performs the
   action, because a memory server cannot see protected branches or review approvals.
-  The companion `AGENTOWNERS` specification is named as a compatible evaluator.
+  The companion `AGENTOWNERS` specification is named as a compatible evaluator, with
+  a non-normative worked example of a policy file in §11.
   `/status`, `/backup` and `/agent` report protocol version `0.6`.
 
 ### Changed

@@ -1239,6 +1239,41 @@ agent detection, and `block > require_approval > allow` evaluation. Where a
 deployment needs an evaluator rather than a slot, referencing it is RECOMMENDED over
 defining a second schema here.
 
+**Worked example (non-normative).** An agent that may open pull requests and comment,
+but may not merge or touch CI, and whose dependency edits need a maintainer:
+
+```yaml
+# repo-governance/AGENTOWNERS.yml
+version: 1
+agents:
+  release-agent:
+    match:
+      actors: ["release-agent[bot]"]
+    allowed: ["open_pr", "comment"]
+    blocked: ["merge_pr", "edit_workflows"]
+defaults:
+  unknown_agent: require_approval
+  docs_only: allow
+  workflows: block
+rules:
+  - name: "Dependency changes need a human"
+    when:
+      changes_package_files: true
+    effect: require_approval
+    reason: "Dependency changes require maintainer review."
+```
+
+Overlapping matches resolve by effect, not by rule order: `block` beats
+`require_approval`, which beats `allow`. Note that `unknown_agent` is not set to
+`allow` — an agent missing from the file inherits nothing from the one that is
+listed, which is the same reasoning that makes absence of the file mean "no policy"
+rather than "allow all".
+
+The example is illustrative, not required, and the schema is AGENTOWNERS', not this
+protocol's. That tool's own quick start reads the policy from
+`.github/AGENTOWNERS.yml` and takes its path as configuration, so a deployment using
+it should point `policy-path` at whichever of the two locations above it chose.
+
 **Why the decision does not live here.** A memory server does not know which
 repositories the agent can reach, which branches are protected, or who approved a
 review. A protocol that specified the evaluation would be specifying policy for a
