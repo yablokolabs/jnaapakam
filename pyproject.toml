@@ -44,6 +44,11 @@ packages = ["src/jnaapakam"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Pinned rather than inherited: without it pytest-asyncio emits a deprecation
+# warning, and filterwarnings = error turns that warning into an INTERNALERROR at
+# configure time. "function" is the behaviour every pytest-asyncio release has
+# had here, so naming it changes nothing except making the default explicit.
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error"]
 
 [tool.ruff]
